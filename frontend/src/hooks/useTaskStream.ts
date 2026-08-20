@@ -1,0 +1,58 @@
+import { useEffect, useRef, useState } from "react";
+
+import { api } from "../api/client";
+import type { TaskEvent } from "../api/types";
+
+const EVENT_TYPES = [
+  "task.created",
+  "task.state_changed",
+  "artifact.created",
+  "tool.called",
+  "tool.returned",
+  "execution.queued",
+  "execution.started",
+  "execution.progress",
+  "execution.finished",
+  "execution.recovered",
+  "execution.requeued",
+];
+
+export type StreamStatus = "idle" | "connecting" | "connected" | "reconnecting";
+
+export function useTaskStream(
+  taskId: string | null,
+  afterEventId: number,
+  onEvent: (event: TaskEvent) => void,
+): StreamStatus {
+  const [status, setStatus] = useState<StreamStatus>("idle");
+  const callbackRef = useRef(onEvent);
+  callbackRef.current = onEvent;
+
+  useEffect(() => {
+    if (!taskId) {
+      setStatus("idle");
+      return;
+    }
+    setStatus("connecting");
+    // afterEventId 只用于本次连接的初始游标。连接建立后浏览器会通过
+    // Last-Event-ID 自动完成断线续传，不能在每个新事件到来时重建连接。
+    const source = new EventSource(api.eventStreamUrl(taskId, afterEventId));
+    const handleEvent = (raw: Event) => {
+      const message = raw as MessageEvent<string>;
+      callbackRef.current(JSON.parse(message.data) as TaskEvent);
+    };
+    for (const eventType of EVENT_TYPES) {
+      source.addEventListener(eventType, handleEvent);
+    }
+    source.onopen = () => setStatus("connected");
+    source.onerror = () => setStatus("reconnecting");
+    return () => {
+      for (const eventType of EVENT_TYPES) {
+        source.removeEventListener(eventType, handleEvent);
+      }
+      source.close();
+    };
+  }, [taskId]);
+
+  return status;
+}

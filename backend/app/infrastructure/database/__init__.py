@@ -1,0 +1,2 @@
+"""Relational persistence adapter."""
+

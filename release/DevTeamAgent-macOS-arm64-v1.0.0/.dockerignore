@@ -1,0 +1,12 @@
+.git
+.agents
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+.env
+data
+frontend/dist
+frontend/node_modules
+frontend/.vite
+demo-workspace/.devteam

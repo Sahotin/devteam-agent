@@ -1,0 +1,52 @@
+services:
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: devteam_agent
+      POSTGRES_USER: devteam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devteam-local-password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devteam -d devteam_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    build:
+      context: .
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DEVTEAM_ENV: production
+      DEVTEAM_DATABASE_URL: postgresql+psycopg://devteam:${POSTGRES_PASSWORD:-devteam-local-password}@database:5432/devteam_agent
+      DEVTEAM_DATABASE_AUTO_CREATE: "false"
+      DEVTEAM_LOG_JSON: "true"
+      DEVTEAM_LOG_LEVEL: INFO
+      DEVTEAM_LLM_PROVIDER: ${DEVTEAM_LLM_PROVIDER:-demo}
+      DEVTEAM_LLM_MODEL: ${DEVTEAM_LLM_MODEL:-gpt-5.6-sol}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEVTEAM_WORKER_CONCURRENCY: ${DEVTEAM_WORKER_CONCURRENCY:-2}
+      DEVTEAM_TERMINAL_EXECUTOR: local
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./demo-workspace:/workspace
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
