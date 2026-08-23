@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 from backend.app.domain.rag import SourceFile
 from backend.app.tools.path_policy import WorkspacePathPolicy
@@ -67,4 +66,3 @@ class RepositoryScanner:
                 )
             )
         return files
-

@@ -10,6 +10,9 @@ from uuid import uuid4
 
 API_ROOT = os.getenv("DEVTEAM_API_ROOT", "http://127.0.0.1:8000/api/v1")
 WORKSPACE = os.getenv("DEVTEAM_SMOKE_WORKSPACE", "/workspace")
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("DEVTEAM_SMOKE_REQUEST_TIMEOUT", "15"))
+EXECUTION_TIMEOUT_SECONDS = float(os.getenv("DEVTEAM_SMOKE_EXECUTION_TIMEOUT", "180"))
+POLL_INTERVAL_SECONDS = float(os.getenv("DEVTEAM_SMOKE_POLL_INTERVAL", "0.25"))
 
 
 def request(method: str, path: str, payload: dict | None = None) -> dict | list:
@@ -21,7 +24,7 @@ def request(method: str, path: str, payload: dict | None = None) -> dict | list:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urlopen(call, timeout=10) as response:
+        with urlopen(call, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             return json.load(response)
     except HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
@@ -35,7 +38,7 @@ def run_action(task_id: str, action: str, **payload) -> dict:
         {"action": action, **payload},
     )
     assert isinstance(execution, dict)
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + EXECUTION_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         current = request("GET", f"/executions/{execution['id']}")
         assert isinstance(current, dict)
@@ -46,8 +49,11 @@ def run_action(task_id: str, action: str, **payload) -> dict:
                 f"execution {current['id']} ended in {current['status']}: "
                 f"{current.get('error_message')}"
             )
-        time.sleep(0.2)
-    raise TimeoutError(f"execution {execution['id']} did not finish")
+        time.sleep(POLL_INTERVAL_SECONDS)
+    raise TimeoutError(
+        f"execution {execution['id']} for action {action} did not finish within "
+        f"{EXECUTION_TIMEOUT_SECONDS:g} seconds"
+    )
 
 
 def main() -> None:

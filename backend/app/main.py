@@ -140,7 +140,7 @@ def create_app(
         _request: Request, error: WorkspaceWritePermissionError
     ) -> JSONResponse:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"detail": str(error)},
         )
 

@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 .env
 data/
@@ -14,5 +15,6 @@ node_modules/
 .pnpm-store/
 tmp/
 *.tsbuildinfo
+frontend/coverage/
 frontend/vite.config.js
 frontend/vite.config.d.ts

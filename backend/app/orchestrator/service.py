@@ -14,7 +14,6 @@ from backend.app.agents.visual_reviewer import VisualReviewerAgent
 from backend.app.domain.artifacts import (
     ArchitectureArtifact,
     CodeChangeArtifact,
-    DiagnosisArtifact,
     DiagnosisEvidence,
     GitCommitArtifact,
     PRDArtifact,
@@ -1093,9 +1092,6 @@ class WorkflowService:
                 visual_report.model_dump(mode="json"),
             )
             if visual_report.verdict == "CHANGES_REQUESTED":
-                code_change_record = self._repository.latest_artifact(
-                    task.id, ArtifactType.CODE_CHANGE
-                )
                 repair_count = self._completed_gate_repair_count(
                     task.id, TaskState.FINAL_VALIDATION, TaskState.CODING
                 )

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from backend.app.domain.artifacts import (
     ArchitectureArtifact,
     DiagnosisArtifact,

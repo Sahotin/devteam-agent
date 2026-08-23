@@ -7,18 +7,31 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
+FROM node:24-bookworm-slim AS node-runtime
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NPM_CONFIG_CACHE=/tmp/.npm \
+    COREPACK_HOME=/tmp/.corepack
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system devteam \
     && useradd --system --gid devteam --home-dir /app devteam
+
+# The API container also executes generated Node.js projects through the
+# restricted terminal runner. Keep Node/npm available in the final image
+# instead of only in the discarded frontend build stage.
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=node-runtime /usr/local/bin/npx /usr/local/bin/npx
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+RUN node --version && npm --version
 
 WORKDIR /app
 COPY pyproject.toml README.md alembic.ini ./

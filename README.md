@@ -1,10 +1,12 @@
 # DevTeam Agent
 
-DevTeam Agent 是一个面向软件研发场景、由结构化产物驱动的 Multi-Agent 协作系统。当前版本为 v1.0.0，已完成六 Agent 研发闭环、受治理工具系统、代码 Hybrid RAG、分层 Memory、后台执行、实时可观测、React 工作台和生产化交付基线。
+[![工程质量门禁](https://github.com/Sahotin/devteam-agent/actions/workflows/quality.yml/badge.svg)](https://github.com/Sahotin/devteam-agent/actions/workflows/quality.yml)
+
+DevTeam Agent 是一个面向软件研发场景、由结构化产物驱动的 Multi-Agent 协作系统。当前版本为 v1.0.0，已完成六个核心研发 Agent，以及故障诊断、视觉质量检查、受治理工具系统、代码 Hybrid RAG、分层 Memory、后台执行、实时可观测和 React 工作台。
 
 ## 已实现能力
 
-- Product、Designer、Architect、Developer、Reviewer、Tester 六个 Agent 协作
+- Product、Designer、Architect、Developer、Reviewer、Tester 六个核心 Agent 协作，并由 Diagnostic 与 Visual Reviewer 承担专项诊断和确定性质量检查
 - PRD 与架构人工审批、审查与测试失败自动返工
 - 需求文档结构化编辑、版本留痕，并由下游 Agent 自动读取最新修订
 - 交付项目启动方式识别、一键启动/停止、外部浏览器访问、健康检查与实时日志
@@ -106,7 +108,7 @@ DeepSeek 与 OpenAI Provider 会从官方响应的 `usage` 字段采集输入、
 ## 本地启动
 
 1. 准备 Python 3.11+ 环境。
-2. 安装开发依赖：`pip install -e ".[dev]"`。
+2. 安装开发依赖：开发时可执行 `pip install -e ".[dev]"`；复现当前验证环境时先执行 `pip install -r requirements-dev.lock`，再执行 `pip install --no-deps -e .`。
 3. 启动服务：`uvicorn backend.app.main:app --reload`。
 4. 打开 `http://127.0.0.1:8000/docs`。
 
@@ -139,6 +141,8 @@ docker compose up --build
 
 Compose 会启动 PostgreSQL，等待数据库健康后执行 `alembic upgrade head`，再启动 API、Worker 和前端工作台。默认地址为 `http://127.0.0.1:8000`。
 
+最终应用镜像同时包含 Python 3.12 与 Node.js 24/npm，使受限终端执行器能够在容器中验证 Agent 生成的 Python 和 Node.js 项目。Maven 项目仍建议使用独立的预构建沙箱镜像。
+
 若使用真实模型，请在未提交到版本库的 `.env` 中设置 `OPENAI_API_KEY`；生产或共享环境必须同时修改默认 PostgreSQL 密码。
 
 默认使用 SQLite，数据库位于 `data/devteam_agent.db`。当前 Demo Model 用于稳定演示结构化工作流；它只会在目标项目的 `.devteam/tasks/` 下生成可追踪的实现计划，不会虚构业务代码或测试已经完成。
@@ -148,13 +152,19 @@ Terminal Tool 默认使用本地受限执行器，仅接受 `PYTHON_COMPILE`、`
 ## 验证
 
 ```text
-python -m pytest backend/tests -q
-python -m compileall -q backend
+python -m ruff check backend scripts
+python -m pytest --cov=backend.app --cov-report=term-missing:skip-covered --cov-report=xml --cov-fail-under=80
+python -m compileall -q backend scripts
 python -m pip check
-cd frontend && pnpm test
+cd frontend && pnpm typecheck
+cd frontend && pnpm test:coverage
 cd frontend && pnpm build
 python scripts/smoke_test.py
 ```
+
+后端覆盖率门禁当前为 80%；启用分支覆盖后的本次核验基线为 81.03%。前端覆盖率目前仅建立防回退基线，组件与浏览器交互测试仍是后续重点，不能把工具函数测试等同于完整 UI 验证。GitHub Actions 会在 Python 3.11/3.12 上运行后端检查，并执行前端类型检查、测试、生产构建、离线 Demo 工作流冒烟和 Docker 镜像构建。
+
+真实模型阶段可能受到网络和模型响应时间影响。冒烟脚本默认允许每个动作执行 180 秒，可通过 `DEVTEAM_SMOKE_EXECUTION_TIMEOUT` 调整；CI 始终使用不联网的 Demo Provider，将模型服务波动与代码回归分开。
 
 详细中文实现说明见 [docs/architecture/implementation-v1.0.md](docs/architecture/implementation-v1.0.md)，最终验收结论见 [docs/milestones/v1.0验收报告.md](docs/milestones/v1.0验收报告.md)。
 

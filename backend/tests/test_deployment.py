@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import yaml
@@ -23,7 +24,21 @@ def test_compose_uses_migrations_healthchecks_and_security_boundaries() -> None:
 
 def test_runtime_image_runs_as_non_root_and_migrates_before_start() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM node:24-bookworm-slim AS node-runtime" in dockerfile
+    assert "COPY --from=node-runtime /usr/local/bin/node" in dockerfile
+    assert "RUN node --version && npm --version" in dockerfile
+    assert "NPM_CONFIG_CACHE=/tmp/.npm" in dockerfile
     assert "USER devteam" in dockerfile
     assert "alembic upgrade head && uvicorn" in dockerfile
     assert "HEALTHCHECK" in dockerfile
     assert dockerfile.index("USER devteam") < dockerfile.index("CMD [")
+
+
+def test_frontend_dependencies_use_exact_versions() -> None:
+    package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
+    for group in ("dependencies", "devDependencies"):
+        for name, version in package[group].items():
+            assert version != "latest", f"{name} must not use latest"
+            assert not version.startswith(("^", "~", ">", "<")), (
+                f"{name} must use an exact version, got {version}"
+            )

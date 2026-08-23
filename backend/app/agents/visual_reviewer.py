@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 import html
 import json
 from pathlib import Path
-import os
 import re
 import shutil
 import socket
