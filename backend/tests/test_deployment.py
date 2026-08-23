@@ -26,7 +26,12 @@ def test_runtime_image_runs_as_non_root_and_migrates_before_start() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM node:24-bookworm-slim AS node-runtime" in dockerfile
     assert "COPY --from=node-runtime /usr/local/bin/node" in dockerfile
-    assert "RUN node --version && npm --version" in dockerfile
+    assert "COPY --from=node-runtime /usr/local/bin/npm" not in dockerfile
+    assert "COPY --from=node-runtime /usr/local/bin/npx" not in dockerfile
+    assert "ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm" in dockerfile
+    assert "ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx" in dockerfile
+    assert "&& npm --version" in dockerfile
+    assert "&& npx --version" in dockerfile
     assert "NPM_CONFIG_CACHE=/tmp/.npm" in dockerfile
     assert "USER devteam" in dockerfile
     assert "alembic upgrade head && uvicorn" in dockerfile

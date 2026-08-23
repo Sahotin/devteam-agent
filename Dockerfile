@@ -27,11 +27,15 @@ RUN apt-get update \
 # restricted terminal runner. Keep Node/npm available in the final image
 # instead of only in the discarded frontend build stage.
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=node-runtime /usr/local/bin/npm /usr/local/bin/npm
-COPY --from=node-runtime /usr/local/bin/npx /usr/local/bin/npx
 COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 
-RUN node --version && npm --version
+# Docker COPY dereferences npm/npx links from the Node image. Recreate them so
+# npm resolves ../lib/cli.js relative to its real package directory.
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && node --version \
+    && npm --version \
+    && npx --version
 
 WORKDIR /app
 COPY pyproject.toml README.md alembic.ini ./
