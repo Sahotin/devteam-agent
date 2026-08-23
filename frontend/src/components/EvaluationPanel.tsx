@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../api/client";
-import type { ProjectEvaluationSummary, TaskEvaluationReport } from "../api/types";
+import type {
+  PolicyBenchmarkReport,
+  ProjectEvaluationSummary,
+  TaskEvaluationReport,
+} from "../api/types";
 
 const governanceLabels = { FAST: "快速治理", STANDARD: "标准治理", STRICT: "严格治理" };
 
@@ -17,6 +21,7 @@ export function EvaluationPanel({ report, projectSummary, onReportChange }: Eval
   const [comment, setComment] = useState(report.feedback?.comment ?? "");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [benchmark, setBenchmark] = useState<PolicyBenchmarkReport | null>(null);
 
   useEffect(() => {
     setRating(report.feedback?.rating ?? 5);
@@ -24,6 +29,16 @@ export function EvaluationPanel({ report, projectSummary, onReportChange }: Eval
     setComment(report.feedback?.comment ?? "");
     setMessage("");
   }, [report.task_id, report.feedback?.updated_at]);
+
+  useEffect(() => {
+    let active = true;
+    void api.getPolicyBenchmark().then((result) => {
+      if (active) setBenchmark(result);
+    }).catch(() => {
+      if (active) setBenchmark(null);
+    });
+    return () => { active = false; };
+  }, []);
 
   const submit = async () => {
     setSaving(true);
@@ -82,6 +97,24 @@ export function EvaluationPanel({ report, projectSummary, onReportChange }: Eval
               <p>已评测 {projectSummary.evaluated_tasks} 个任务，平均 {projectSummary.average_score.toFixed(1)} 分。</p>
               <ul>{projectSummary.calibration_recommendations.map((item) => <li key={item}>{item}</li>)}</ul>
               <small>这些是建议，不会自动修改治理阈值或模型路由。</small>
+            </section>
+          )}
+          {benchmark && (
+            <section>
+              <h3>治理策略回归集</h3>
+              <p>{benchmark.dataset_version} 共 {benchmark.total} 个标准场景，当前通过 {benchmark.passed} 个，规则匹配率 {benchmark.pass_rate.toFixed(1)}%。</p>
+              {benchmark.passed < benchmark.total ? (
+                <ul>
+                  {benchmark.results.filter((item) => !item.passed).map((item) => (
+                    <li key={item.scenario.id}>
+                      {item.scenario.id}：预期 {governanceLabels[item.scenario.expected_governance]}，
+                      实际 {governanceLabels[item.actual_governance]}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <small>该结果只验证确定性治理分类，不代表真实模型生成质量。</small>
+              )}
             </section>
           )}
         </div>

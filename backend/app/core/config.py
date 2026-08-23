@@ -46,6 +46,7 @@ class Settings:
     )
     llm_provider: str = "demo"
     llm_model: str = "gpt-5.6-sol"
+    model_routing_strategy: str = "DYNAMIC"
     llm_light_model: str | None = None
     llm_standard_model: str | None = None
     llm_strong_model: str | None = None
@@ -73,6 +74,16 @@ class Settings:
         if self.llm_provider not in {"demo", "openai", "deepseek"}:
             raise ValueError(
                 "DEVTEAM_LLM_PROVIDER must be 'demo', 'openai' or 'deepseek'"
+            )
+        if self.model_routing_strategy not in {
+            "DYNAMIC",
+            "FIXED_LIGHT",
+            "FIXED_STANDARD",
+            "FIXED_STRONG",
+        }:
+            raise ValueError(
+                "DEVTEAM_MODEL_ROUTING_STRATEGY must be DYNAMIC, FIXED_LIGHT, "
+                "FIXED_STANDARD or FIXED_STRONG"
             )
         if self.llm_provider == "openai" and not self.openai_api_key:
             raise ValueError(
@@ -143,6 +154,9 @@ class Settings:
             ),
             llm_provider=getenv("DEVTEAM_LLM_PROVIDER", "demo") or "demo",
             llm_model=getenv("DEVTEAM_LLM_MODEL", "gpt-5.6-sol") or "gpt-5.6-sol",
+            model_routing_strategy=(
+                getenv("DEVTEAM_MODEL_ROUTING_STRATEGY", "DYNAMIC") or "DYNAMIC"
+            ).upper(),
             llm_light_model=getenv("DEVTEAM_LLM_LIGHT_MODEL") or None,
             llm_standard_model=getenv("DEVTEAM_LLM_STANDARD_MODEL") or None,
             llm_strong_model=getenv("DEVTEAM_LLM_STRONG_MODEL") or None,

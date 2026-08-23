@@ -46,6 +46,13 @@ class GovernanceLevel(StrEnum):
     STRICT = "STRICT"
 
 
+class ModelRoutingStrategy(StrEnum):
+    DYNAMIC = "DYNAMIC"
+    FIXED_LIGHT = "FIXED_LIGHT"
+    FIXED_STANDARD = "FIXED_STANDARD"
+    FIXED_STRONG = "FIXED_STRONG"
+
+
 class DiagnosisStatus(StrEnum):
     CONFIRMED = "CONFIRMED"
     NOT_CONFIRMED = "NOT_CONFIRMED"

@@ -90,6 +90,8 @@ DeepSeek 与 OpenAI Provider 会从官方响应的 `usage` 字段采集输入、
 
 完成任务后可以通过 `POST /api/v1/tasks/{task_id}/evaluation-feedback` 保存 1–5 分满意度、成果是否符合预期和文字反馈。`GET /api/v1/projects/{project_id}/evaluation-summary` 按治理等级聚合客观质量、Token、耗时和主观评分。每个治理等级至少积累三个任务后才会产生针对性校准建议，系统不会未经用户确认自动改写策略。`GET /api/v1/evaluation/benchmark` 可运行内置的确定性策略回归集。
 
+标准评测集现包含 21 个版本化场景。`scripts/run_agent_evaluation.py` 可以真实执行选定场景，记录完成率、质量门禁、任务评分、Token、模型与墙钟耗时、升档、恢复和失败次数，并生成 JSON/Markdown 报告。通过 `DEVTEAM_MODEL_ROUTING_STRATEGY` 可在 `DYNAMIC`、`FIXED_LIGHT`、`FIXED_STANDARD` 和 `FIXED_STRONG` 之间切换，使用同一场景集合进行对照。完整说明见 [Agent Evaluation 使用说明](docs/evaluation/agent-evaluation.md)。
+
 ## Memory 工作方式
 
 - Short-term Memory 保存当前任务每一阶段的结构化产物，任务完成后自动标记为 `STALE`。

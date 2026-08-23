@@ -71,7 +71,12 @@ from backend.app.domain.evaluation import (
     TaskEvaluationFeedbackRecord,
     TaskEvaluationReport,
 )
-from backend.app.evaluation.benchmark import PolicyBenchmarkReport, run_policy_benchmark
+from backend.app.evaluation.benchmark import (
+    STANDARD_SCENARIOS,
+    EvaluationScenario,
+    PolicyBenchmarkReport,
+    run_policy_benchmark,
+)
 
 
 router = APIRouter(prefix="/api/v1")
@@ -137,6 +142,7 @@ def capabilities(container: Container) -> CapabilityResponse:
         async_execution=True,
         llm_provider=settings.llm_provider,
         llm_model=settings.llm_model,
+        model_routing_strategy=container.model_router.strategy.value,
         model_profiles=[
             {
                 "tier": profile.tier.value,
@@ -151,7 +157,7 @@ def capabilities(container: Container) -> CapabilityResponse:
             agent_name: tier.value
             for agent_name, tier in container.model_router.assignments.items()
         },
-        dynamic_model_routing=True,
+        dynamic_model_routing=(container.model_router.strategy.value == "DYNAMIC"),
         governance_model_tiers={
             governance.value: {
                 agent_name: tier.value
@@ -335,6 +341,15 @@ def get_project_evaluation_summary(
 )
 def get_policy_benchmark() -> PolicyBenchmarkReport:
     return run_policy_benchmark()
+
+
+@router.get(
+    "/evaluation/scenarios",
+    response_model=list[EvaluationScenario],
+    tags=["evaluation"],
+)
+def list_evaluation_scenarios() -> list[EvaluationScenario]:
+    return STANDARD_SCENARIOS
 
 
 @router.get(

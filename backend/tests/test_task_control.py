@@ -90,6 +90,8 @@ def test_capabilities_report_current_executor(client: TestClient) -> None:
     assert capabilities["async_execution"] is True
     assert capabilities["llm_provider"] == "demo"
     assert capabilities["llm_model"] == "gpt-5.6-sol"
+    assert capabilities["model_routing_strategy"] == "DYNAMIC"
+    assert capabilities["dynamic_model_routing"] is True
     assert [
         profile["tier"] for profile in capabilities["model_profiles"]
     ] == ["LIGHT", "STANDARD", "STRONG"]

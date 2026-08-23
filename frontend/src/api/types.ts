@@ -246,6 +246,33 @@ export interface ProjectEvaluationSummary {
   calibration_recommendations: string[];
 }
 
+export interface EvaluationScenario {
+  id: string;
+  category: string;
+  requirement: string;
+  execution_scope: ExecutionScope;
+  preference: DeliveryPreference;
+  expected_governance: GovernanceLevel;
+  rationale: string;
+  tags: string[];
+}
+
+export interface PolicyScenarioResult {
+  scenario: EvaluationScenario;
+  actual_governance: GovernanceLevel;
+  risk_score: number;
+  passed: boolean;
+  reasons: string[];
+}
+
+export interface PolicyBenchmarkReport {
+  dataset_version: string;
+  total: number;
+  passed: number;
+  pass_rate: number;
+  results: PolicyScenarioResult[];
+}
+
 export interface ExecutionCommand {
   action: ExecutionAction;
   decision?: "APPROVED" | "CHANGES_REQUESTED";
@@ -340,6 +367,7 @@ export interface Capabilities {
   async_execution: boolean;
   llm_provider: string;
   llm_model: string;
+  model_routing_strategy: "DYNAMIC" | "FIXED_LIGHT" | "FIXED_STANDARD" | "FIXED_STRONG";
   model_profiles: Array<{
     tier: "LIGHT" | "STANDARD" | "STRONG";
     provider: string;

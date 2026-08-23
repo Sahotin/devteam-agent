@@ -59,6 +59,7 @@ class CapabilityResponse(BaseModel):
     async_execution: bool
     llm_provider: str
     llm_model: str
+    model_routing_strategy: str
     model_profiles: list[ModelProfileCapability]
     agent_model_tiers: dict[str, str]
     dynamic_model_routing: bool

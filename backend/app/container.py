@@ -29,7 +29,7 @@ from backend.app.infrastructure.llm.router import (
     ModelProfile,
     ModelTier,
 )
-from backend.app.domain.enums import GovernanceLevel
+from backend.app.domain.enums import GovernanceLevel, ModelRoutingStrategy
 from backend.app.domain.model_usage import summarize_model_usage
 from backend.app.execution.service import ExecutionManager
 from backend.app.evaluation.service import EvaluationService
@@ -205,7 +205,11 @@ class ApplicationContainer:
                 structured_model = cls._build_profile_model(settings, profile)
                 cache[cache_key] = structured_model
             models[tier] = structured_model
-        return AgentModelRouter(models=models, profiles=profiles)
+        return AgentModelRouter(
+            models=models,
+            profiles=profiles,
+            strategy=ModelRoutingStrategy(settings.model_routing_strategy),
+        )
 
     @staticmethod
     def _model_audit_sink(repository: SqlAlchemyRepository):

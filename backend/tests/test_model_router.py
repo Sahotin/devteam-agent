@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from backend.app.container import ApplicationContainer
 from backend.app.core.config import Settings
-from backend.app.domain.enums import GovernanceLevel
+from backend.app.domain.enums import GovernanceLevel, ModelRoutingStrategy
 from backend.app.infrastructure.llm.demo import DemoStructuredModel
 from backend.app.infrastructure.llm.router import (
     AgentModelRouter,
@@ -189,6 +189,39 @@ def test_checkpoint_retry_promotes_initial_tier() -> None:
 
     assert plan.tiers[0] is ModelTier.STANDARD
     assert "初始档位已提升" in plan.reason
+
+
+def test_fixed_strategy_uses_one_tier_without_automatic_escalation() -> None:
+    models = {
+        tier: RecordingModel(RouteResult(value=tier.value)) for tier in ModelTier
+    }
+    profiles = {
+        tier: ModelProfile(
+            tier=tier,
+            provider="test",
+            model=tier.value.lower(),
+            thinking_enabled=False,
+            max_output_tokens=None,
+        )
+        for tier in ModelTier
+    }
+    router = AgentModelRouter(
+        models=models,
+        profiles=profiles,
+        strategy=ModelRoutingStrategy.FIXED_LIGHT,
+    )
+
+    plan = router.plan_for(
+        "developer-agent",
+        TaskModelRoutingContext(
+            "task-fixed",
+            GovernanceLevel.STRICT,
+            workflow_retry_attempt=2,
+        ),
+    )
+
+    assert plan.tiers == (ModelTier.LIGHT,)
+    assert "禁用自动升档" in plan.reason
 
 
 @pytest.mark.asyncio

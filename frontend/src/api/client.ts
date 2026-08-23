@@ -18,6 +18,7 @@ import type {
   TaskEvaluationFeedback,
   TaskEvaluationReport,
   ProjectEvaluationSummary,
+  PolicyBenchmarkReport,
 } from "./types";
 
 const API_ROOT = import.meta.env.VITE_API_ROOT ?? "/api/v1";
@@ -97,6 +98,8 @@ export const api = {
   }),
   getProjectEvaluationSummary: (projectId: string) =>
     request<ProjectEvaluationSummary>(`/projects/${projectId}/evaluation-summary`),
+  getPolicyBenchmark: () =>
+    request<PolicyBenchmarkReport>("/evaluation/benchmark"),
   getDeliveryGuide: (taskId: string) =>
     request<DeliveryGuide>(`/tasks/${taskId}/delivery-guide`),
   getRuntime: (taskId: string) =>

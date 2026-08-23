@@ -105,8 +105,23 @@ def test_standard_policy_benchmark_is_fully_reproducible() -> None:
     first = run_policy_benchmark()
     second = run_policy_benchmark()
 
-    assert first.total == 8
+    assert first.total == 21
     assert first.pass_rate == 100
     assert [item.actual_governance for item in first.results] == [
         item.actual_governance for item in second.results
     ]
+
+
+def test_evaluation_scenarios_are_exposed_for_external_runners(
+    client: TestClient,
+) -> None:
+    response = client.get("/api/v1/evaluation/scenarios")
+
+    assert response.status_code == 200
+    scenarios = response.json()
+    assert len(scenarios) == 21
+    assert {item["expected_governance"] for item in scenarios} == {
+        "FAST",
+        "STANDARD",
+        "STRICT",
+    }

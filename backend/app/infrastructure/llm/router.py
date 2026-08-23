@@ -11,7 +11,7 @@ from typing import Mapping
 
 from pydantic import BaseModel
 
-from backend.app.domain.enums import GovernanceLevel
+from backend.app.domain.enums import GovernanceLevel, ModelRoutingStrategy
 from backend.app.infrastructure.llm.base import StructuredModel, StructuredOutput
 from backend.app.infrastructure.llm.telemetry import (
     ModelTokenUsage,
@@ -120,6 +120,7 @@ class AgentModelRouter:
         models: Mapping[ModelTier, StructuredModel],
         profiles: Mapping[ModelTier, ModelProfile],
         assignments: Mapping[str, ModelTier] | None = None,
+        strategy: ModelRoutingStrategy = ModelRoutingStrategy.DYNAMIC,
     ) -> None:
         missing_models = set(ModelTier) - set(models)
         missing_profiles = set(ModelTier) - set(profiles)
@@ -129,6 +130,7 @@ class AgentModelRouter:
         self._models = dict(models)
         self._profiles = dict(profiles)
         self._assignments = dict(assignments or DEFAULT_AGENT_TIERS)
+        self._strategy = strategy
 
     @classmethod
     def uniform(
@@ -180,6 +182,24 @@ class AgentModelRouter:
         active = context or _routing_context.get()
         governance = active.governance_level if active else GovernanceLevel.STANDARD
         retry_attempt = active.workflow_retry_attempt if active else 0
+        self.tier_for_agent(agent_name)
+        fixed_tiers = {
+            ModelRoutingStrategy.FIXED_LIGHT: ModelTier.LIGHT,
+            ModelRoutingStrategy.FIXED_STANDARD: ModelTier.STANDARD,
+            ModelRoutingStrategy.FIXED_STRONG: ModelTier.STRONG,
+        }
+        if self._strategy in fixed_tiers:
+            fixed = fixed_tiers[self._strategy]
+            return ModelRoutePlan(
+                agent_name=agent_name,
+                governance_level=governance,
+                tiers=(fixed,),
+                workflow_retry_attempt=retry_attempt,
+                reason=(
+                    f"评测对照策略 {self._strategy.value} 固定使用 {fixed.value} 档；"
+                    "禁用自动升档以保证实验可复现"
+                ),
+            )
         try:
             initial = GOVERNANCE_AGENT_TIERS[governance][agent_name]
         except KeyError as error:
@@ -210,6 +230,10 @@ class AgentModelRouter:
     @property
     def assignments(self) -> Mapping[str, ModelTier]:
         return MappingProxyType(self._assignments)
+
+    @property
+    def strategy(self) -> ModelRoutingStrategy:
+        return self._strategy
 
     @property
     def governance_assignments(
