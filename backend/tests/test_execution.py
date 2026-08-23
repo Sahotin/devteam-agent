@@ -6,7 +6,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from backend.app.core.config import Settings
 from backend.app.domain.enums import ExecutionAction, TaskState
+from backend.app.main import create_app
 
 
 def create_task(client: TestClient, workspace: Path) -> tuple[dict, dict]:
@@ -154,6 +156,52 @@ def test_active_execution_constraint_cancellation_and_restart_recovery(
     assert recovered.status.value == "QUEUED"
     assert recovered.attempt == 1
     assert "worker restarted" in recovered.error_message
+
+
+def test_service_restart_recovers_and_executes_inflight_job(tmp_path: Path) -> None:
+    database_path = tmp_path / "restart.db"
+    settings = Settings(database_url=f"sqlite:///{database_path}")
+    execution_id = ""
+    task_id = ""
+
+    seed_app = create_app(settings)
+    with TestClient(seed_app) as seed_client:
+        _project, task = create_task(seed_client, tmp_path / "restart-workspace")
+        task_id = task["id"]
+        repository = seed_client.app.state.container.repository
+        execution = repository.create_execution(
+            task_id,
+            ExecutionAction.START,
+            {},
+        )
+        claimed = repository.claim_execution(execution.id)
+        assert claimed is not None
+        assert claimed.status.value == "RUNNING"
+        execution_id = execution.id
+
+    # 使用同一个持久化数据库创建全新的应用实例，模拟服务进程重启。
+    restarted_app = create_app(settings)
+    with TestClient(restarted_app) as restarted_client:
+        deadline = time.monotonic() + 5
+        recovered = None
+        while time.monotonic() < deadline:
+            recovered = restarted_client.get(
+                f"/api/v1/executions/{execution_id}"
+            ).json()
+            if recovered["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                break
+            time.sleep(0.01)
+
+        assert recovered is not None
+        assert recovered["status"] == "SUCCEEDED"
+        assert recovered["attempt"] == 2
+        assert recovered["result_state"] == "PRD_APPROVAL"
+        events = restarted_client.get(
+            f"/api/v1/tasks/{task_id}/events"
+        ).json()
+        event_types = [item["event_type"] for item in events]
+        assert "execution.recovered" in event_types
+        assert event_types.count("execution.started") == 2
 
 
 def test_sse_snapshot_supports_event_id_resume(

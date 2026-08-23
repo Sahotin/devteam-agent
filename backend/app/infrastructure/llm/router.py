@@ -210,7 +210,13 @@ class AgentModelRouter:
         max_attempts = 3 if governance is GovernanceLevel.STRICT else 2
         tiers = [initial]
         for _ in range(1, max_attempts):
-            tiers.append(_promote(tiers[-1]))
+            promoted = _promote(tiers[-1])
+            # STRONG 已是最高档位。继续追加 STRONG 既不会提升能力，
+            # 又会把一次普通重试错误地记成“模型升级”，还可能重复消耗
+            # 一整个模型超时窗口。
+            if promoted is tiers[-1]:
+                break
+            tiers.append(promoted)
         retry_reason = "；从检查点恢复，初始档位已提升" if retry_attempt > 0 else ""
         return ModelRoutePlan(
             agent_name=agent_name,

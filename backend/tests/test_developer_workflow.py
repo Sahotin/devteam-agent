@@ -2,9 +2,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.agents.developer import _compact_feedback_document
+from backend.app.agents.developer import DeveloperAgent, _compact_feedback_document
 from backend.app.core.config import Settings
-from backend.app.domain.artifacts import DeveloperPlan
+from backend.app.domain.artifacts import DeveloperPlan, PRDArtifact
 from backend.app.infrastructure.llm.demo import DemoStructuredModel
 from backend.app.main import create_app
 
@@ -28,6 +28,73 @@ def test_diagnosis_root_cause_is_preserved_for_developer_feedback() -> None:
     assert "setLoadingState" in compact["root_cause"]
     assert compact["requires_code_change"] is True
     assert "evidence" not in compact
+
+
+def test_developer_converts_review_issue_ids_to_linked_requirements() -> None:
+    prd = PRDArtifact.model_validate(
+        {
+            "title": "追踪关系测试",
+            "background": "验证返工问题编号转换",
+            "problem_statement": "模型可能把审查问题编号写入代码变更",
+            "goals": ["保留需求追踪关系"],
+            "user_stories": [
+                {
+                    "id": "US-001",
+                    "role": "开发者",
+                    "goal": "安全修复审查问题",
+                    "benefit": "避免工作流中断",
+                }
+            ],
+            "requirements": [
+                {
+                    "id": "FR-001",
+                    "description": "开始按钮应启动游戏",
+                    "priority": "MUST",
+                }
+            ],
+            "acceptance_criteria": [
+                {
+                    "id": "AC-001",
+                    "requirement_ids": ["FR-001"],
+                    "condition": "点击开始按钮",
+                    "expected_result": "游戏开始运行",
+                }
+            ],
+        }
+    )
+    plan = DeveloperPlan.model_validate(
+        {
+            "summary": "修复审查问题",
+            "mutations": [
+                {
+                    "operation": "create",
+                    "path": "game.js",
+                    "content": "startGame();\n",
+                    "requirement_ids": ["REV-003"],
+                    "reason": "落实审查意见",
+                }
+            ],
+        }
+    )
+
+    normalized, notes = DeveloperAgent._normalize_requirement_links(
+        plan,
+        prd,
+        [
+            {
+                "issues": [
+                    {
+                        "id": "REV-003",
+                        "requirement_ids": ["AC-001"],
+                    }
+                ]
+            }
+        ],
+    )
+
+    assert normalized.mutations[0].requirement_ids == ["FR-001"]
+    assert "REV-003 → FR-001" in notes[0]
+    DeveloperAgent._validate_requirement_links(normalized, prd)
 
 
 class StaleReplacePlanModel(DemoStructuredModel):

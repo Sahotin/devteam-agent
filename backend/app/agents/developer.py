@@ -487,7 +487,11 @@ class DeveloperAgent:
                     generation_task.cancel()
                     await asyncio.gather(generation_task, return_exceptions=True)
                 raise
-            plan, traceability_notes = self._normalize_requirement_links(plan, prd)
+            plan, traceability_notes = self._normalize_requirement_links(
+                plan,
+                prd,
+                feedback_documents,
+            )
             self._validate_requirement_links(plan, prd)
             plan, conflicts, fresh_context = await self._reconcile_file_mutations(
                 plan,
@@ -672,8 +676,9 @@ class DeveloperAgent:
     def _normalize_requirement_links(
         plan: DeveloperPlan,
         prd: PRDArtifact,
+        feedback_documents: list[dict] | None = None,
     ) -> tuple[DeveloperPlan, list[str]]:
-        """把模型误填的验收标准编号安全转换为其关联的需求编号。
+        """把中间产物编号安全转换为其关联的 PRD 需求编号。
 
         真正未知的编号会被原样保留，并交给后续严格校验拒绝，避免错误地把
         代码变更关联到无关需求。
@@ -683,6 +688,26 @@ class DeveloperAgent:
             criterion.id: criterion.requirement_ids
             for criterion in prd.acceptance_criteria
         }
+        feedback_links: dict[str, list[str]] = {}
+        for document in feedback_documents or []:
+            if not isinstance(document, dict):
+                continue
+            for issue in document.get("issues", []):
+                if not isinstance(issue, dict):
+                    continue
+                issue_id = str(issue.get("id", "")).strip()
+                raw_links = issue.get("requirement_ids", [])
+                if not issue_id or not isinstance(raw_links, list):
+                    continue
+                linked_ids: list[str] = []
+                for raw_link in raw_links:
+                    reference = str(raw_link).strip()
+                    if reference in known_requirement_ids:
+                        linked_ids.append(reference)
+                    elif reference in acceptance_links:
+                        linked_ids.extend(acceptance_links[reference])
+                if linked_ids:
+                    feedback_links[issue_id] = list(dict.fromkeys(linked_ids))
         normalized_mutations: list[FileMutation] = []
         converted_links: dict[str, list[str]] = {}
 
@@ -693,6 +718,10 @@ class DeveloperAgent:
                     normalized_ids.append(reference)
                 elif reference in acceptance_links:
                     linked_ids = acceptance_links[reference]
+                    normalized_ids.extend(linked_ids)
+                    converted_links[reference] = linked_ids
+                elif reference in feedback_links:
+                    linked_ids = feedback_links[reference]
                     normalized_ids.extend(linked_ids)
                     converted_links[reference] = linked_ids
                 else:

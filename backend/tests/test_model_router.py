@@ -172,7 +172,11 @@ def test_governance_matrix_changes_agent_strength() -> None:
     assert router.plan_for(
         "product-agent",
         TaskModelRoutingContext("task", GovernanceLevel.STRICT),
-    ).tiers == (ModelTier.STRONG, ModelTier.STRONG, ModelTier.STRONG)
+    ).tiers == (ModelTier.STRONG,)
+    assert router.plan_for(
+        "developer-agent",
+        TaskModelRoutingContext("task", GovernanceLevel.STANDARD),
+    ).tiers == (ModelTier.STRONG,)
 
 
 def test_checkpoint_retry_promotes_initial_tier() -> None:

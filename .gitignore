@@ -18,5 +18,7 @@ evaluation-workspace/
 reports/generated/
 *.tsbuildinfo
 frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
 frontend/vite.config.js
 frontend/vite.config.d.ts
