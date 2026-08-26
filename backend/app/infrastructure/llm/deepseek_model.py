@@ -8,7 +8,7 @@ from openai import APIError, AsyncOpenAI, DefaultAsyncHttpxClient
 from pydantic import ValidationError
 
 from backend.app.infrastructure.llm.base import StructuredOutput
-from backend.app.infrastructure.llm.errors import translate_openai_error
+from backend.app.infrastructure.llm.errors import ModelTimeoutError, translate_openai_error
 from backend.app.infrastructure.llm.telemetry import report_model_usage
 
 
@@ -124,8 +124,8 @@ class DeepSeekStructuredModel:
                     await asyncio.sleep(min(2**network_failures, 4))
                     network_failures += 1
                     continue
-                raise TimeoutError(
-                    "MODEL_TIMEOUT_ERROR | DeepSeek 完整生成超过"
+                raise ModelTimeoutError(
+                    "DeepSeek 完整生成超过"
                     f" {self._timeout_seconds:g} 秒，已停止等待；"
                     "网络连接不一定异常，可能是本次代码上下文或输出内容较大。"
                 ) from error

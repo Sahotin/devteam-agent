@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Code Change"
+  short_description: "Safely plan, patch, test, and review existing code"
+  default_prompt: "Use $safe-code-change with a DevTeam task_id to implement this change safely."

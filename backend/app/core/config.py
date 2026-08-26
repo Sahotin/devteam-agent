@@ -44,6 +44,7 @@ class Settings:
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     )
+    mcp_allowed_workspace_roots: tuple[str, ...] = ()
     llm_provider: str = "demo"
     llm_model: str = "gpt-5.6-sol"
     model_routing_strategy: str = "DYNAMIC"
@@ -151,6 +152,13 @@ class Settings:
                     "http://localhost:5173,http://127.0.0.1:5173",
                 ) or "").split(",")
                 if origin.strip()
+            ),
+            mcp_allowed_workspace_roots=tuple(
+                root.strip()
+                for root in (
+                    getenv("DEVTEAM_MCP_ALLOWED_WORKSPACE_ROOTS", "") or ""
+                ).split(",")
+                if root.strip()
             ),
             llm_provider=getenv("DEVTEAM_LLM_PROVIDER", "demo") or "demo",
             llm_model=getenv("DEVTEAM_LLM_MODEL", "gpt-5.6-sol") or "gpt-5.6-sol",

@@ -55,6 +55,7 @@ from backend.app.tools.git_tools import (
     GitStatusTool,
 )
 from backend.app.tools.memory_search import MemorySearchTool
+from backend.app.tools.project_context import ProjectContextTool
 from backend.app.tools.registry import ToolRegistry
 from backend.app.tools.rag_search import RagSearchTool
 from backend.app.tools.terminal import DockerTerminalTool, TerminalTool
@@ -67,6 +68,7 @@ class ApplicationContainer:
     repository: SqlAlchemyRepository
     index_service: CodeIndexService
     memory_service: MemoryService
+    tools: ToolRegistry
     workflow: WorkflowService
     execution_manager: ExecutionManager
     runtime_manager: ProjectRuntimeManager
@@ -111,6 +113,7 @@ class ApplicationContainer:
         tools.register(CodeSearchTool())
         tools.register(RagSearchTool(repository, index_service))
         tools.register(MemorySearchTool(repository, memory_service))
+        tools.register(ProjectContextTool(repository))
         if settings.terminal_executor == "docker":
             tools.register(DockerTerminalTool(settings.docker_executable))
         elif settings.terminal_executor == "local":
@@ -181,6 +184,7 @@ class ApplicationContainer:
             repository=repository,
             index_service=index_service,
             memory_service=memory_service,
+            tools=tools,
             workflow=workflow,
             execution_manager=execution_manager,
             runtime_manager=runtime_manager,

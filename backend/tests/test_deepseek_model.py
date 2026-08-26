@@ -14,7 +14,7 @@ from backend.app.infrastructure.llm.deepseek_model import (
     DeepSeekStructuredModel,
     DeepSeekStructuredModelResponseError,
 )
-from backend.app.infrastructure.llm.errors import ModelConnectionError
+from backend.app.infrastructure.llm.errors import ModelConnectionError, ModelTimeoutError
 from backend.app.infrastructure.llm.telemetry import capture_model_usage
 
 
@@ -251,6 +251,29 @@ async def test_deepseek_model_translates_connection_error_without_leaking_key() 
     assert "已自动尝试 3 次" in message
     assert "api.deepseek.com" in message
     assert "sensitive-value" not in message
+
+
+@pytest.mark.asyncio
+async def test_deepseek_model_translates_generation_timeout() -> None:
+    model = DeepSeekStructuredModel(
+        api_key="not-a-real-key",
+        model="deepseek-v4-flash",
+        timeout_seconds=30,
+        max_retries=0,
+        client=FakeClient([TimeoutError("generation timed out")]),
+    )
+
+    with pytest.raises(ModelTimeoutError) as captured:
+        await model.generate(
+            system_prompt="生成结果",
+            payload={},
+            output_schema=ExampleOutput,
+        )
+
+    message = str(captured.value)
+    assert "MODEL_TIMEOUT_ERROR" in message
+    assert "30 秒" in message
+    assert "完整生成" in message
 
 
 def test_deepseek_settings_require_key_and_hide_secret() -> None:
