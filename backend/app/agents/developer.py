@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import posixpath
 import re
 from time import monotonic
 
@@ -61,6 +62,14 @@ DEVELOPER_SYSTEM_PROMPT += """
 """.strip()
 DEVELOPER_SYSTEM_PROMPT += """
 
+当 payload 中包含 active_failures 时，当前失败命令的证据优先级高于历史反馈：
+1. 修改计划必须先覆盖每个 active_failure_path_groups 中至少一个失败文件或其直接依赖；
+2. 不得在当前失败尚未处理时继续修改只与旧审查意见有关的文件；
+3. 测试文件可以用于定位问题，但不得删除测试、降低断言或改写正确预期来掩盖失败；
+4. verification_notes 必须说明当前失败命令、根因、修改文件和回归验证方式。
+""".strip()
+DEVELOPER_SYSTEM_PROMPT += """
+
 同一个文件在一份开发计划中最多只能出现一次 mutation；需要修改同一文件多个位置时，
 必须合并为一次完整替换，避免前一项修改使后一项的文件哈希失效。
 当 feedback 中存在 BLOCKER 或 MAJOR 问题时，必须逐项落实，且修改计划必须覆盖每个问题
@@ -82,6 +91,11 @@ SOURCE_PATH_PATTERN = re.compile(
     r"(?i)(?:[A-Z]:[\\/][^:\r\n()]+?\.(?:ts|tsx|js|jsx|py|html|css))"
     r"|(?:\b(?:src|public|tests?)[\\/][^:\r\n()]+?\.(?:ts|tsx|js|jsx|py|html|css))"
 )
+RELATIVE_IMPORT_PATTERN = re.compile(
+    r"(?m)(?:\bfrom\s+|\bimport\s*\(\s*|\brequire\s*\(\s*)"
+    r"['\"](\.{1,2}/[^'\"]+)['\"]"
+)
+SOURCE_IMPORT_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".py")
 
 
 def _compact_process_excerpt(value: object, limit: int = 5_000) -> str:
@@ -173,6 +187,92 @@ def _compact_feedback_document(document: dict) -> dict:
     return compact
 
 
+def _failed_feedback_query(document: dict | None) -> str:
+    """提取最新失败命令作为返工检索词，避免 TestReport 回退到原始需求。"""
+    if not isinstance(document, dict):
+        return ""
+    parts: list[str] = []
+    for result in document.get("results", []):
+        if not isinstance(result, dict):
+            continue
+        if str(result.get("status", "")).upper() == "SUCCEEDED":
+            continue
+        detail = _compact_process_excerpt(
+            result.get("stderr_excerpt") or result.get("stdout_excerpt"),
+            limit=1_000,
+        )
+        parts.append(f"{result.get('runner', '')} {detail}".strip())
+    return " ".join(" ".join(parts).split())
+
+
+def _diagnostic_path_groups(document: dict | None, workspace: Path) -> list[set[str]]:
+    """按失败命令提取诊断路径；每组必须由同一轮修改覆盖至少一个路径。"""
+    if not isinstance(document, dict):
+        return []
+    groups: list[set[str]] = []
+    for result in document.get("results", []):
+        if not isinstance(result, dict):
+            continue
+        if str(result.get("status", "")).upper() == "SUCCEEDED":
+            continue
+        diagnostic_text = " ".join(
+            str(result.get(key, ""))
+            for key in ("stdout_excerpt", "stderr_excerpt")
+        )
+        paths: set[str] = set()
+        for candidate in SOURCE_PATH_PATTERN.findall(diagnostic_text):
+            candidate_path = Path(candidate.replace("\\", "/"))
+            try:
+                relative = (
+                    candidate_path.resolve().relative_to(workspace)
+                    if candidate_path.is_absolute()
+                    else candidate_path
+                )
+                normalized = relative.as_posix()
+            except (OSError, ValueError):
+                continue
+            if normalized.split("/", 1)[0].casefold() in {
+                "node_modules",
+                "coverage",
+                "dist",
+                ".git",
+            }:
+                continue
+            paths.add(normalized)
+        if paths:
+            groups.append(paths)
+    return groups
+
+
+def _relative_import_candidates(importer_path: str, content: str) -> list[str]:
+    """把失败文件中的相对 import 映射为可能的工作区源码路径。"""
+    importer = importer_path.replace("\\", "/")
+    importer_parent = posixpath.dirname(importer)
+    candidates: list[str] = []
+    for raw_import in RELATIVE_IMPORT_PATTERN.findall(content):
+        normalized_base = posixpath.normpath(
+            posixpath.join(importer_parent, raw_import.replace("\\", "/"))
+        )
+        if normalized_base == ".." or normalized_base.startswith("../"):
+            continue
+        suffix = Path(normalized_base).suffix
+        expanded = (
+            [normalized_base]
+            if suffix
+            else [
+                *(normalized_base + extension for extension in SOURCE_IMPORT_EXTENSIONS),
+                *(
+                    normalized_base + "/index" + extension
+                    for extension in SOURCE_IMPORT_EXTENSIONS
+                ),
+            ]
+        )
+        for candidate in expanded:
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
 class DeveloperAgent:
     name = "developer-agent"
     permissions = frozenset(
@@ -206,9 +306,12 @@ class DeveloperAgent:
             workspace_root=workspace_root,
             permissions=self.permissions,
         )
-        feedback_documents = [
-            item for item in [feedback, *(feedback_history or [])] if item
+        history_documents = [
+            item
+            for item in (feedback_history or [])
+            if item and item != feedback
         ]
+        feedback_documents = [item for item in [feedback, *history_documents] if item]
         feedback_issues = [
             issue
             for document in feedback_documents
@@ -219,7 +322,12 @@ class DeveloperAgent:
             str(issue.get("description") or issue.get("recommendation") or "")
             for issue in feedback_issues[-6:]
         ).strip()
-        query = (feedback_query or prd.requirements[0].description)[:300]
+        current_failure_query = _failed_feedback_query(feedback)
+        query = (
+            current_failure_query
+            or feedback_query
+            or prd.requirements[0].description
+        )[:300]
         report_progress(progress, 15, "检索代码上下文", "正在执行 RAG、记忆与代码搜索")
         rag_invocation = await self._tools.invoke(
             "rag.search",
@@ -247,6 +355,11 @@ class DeveloperAgent:
         source_context: list[dict] = []
         searched_paths: list[str] = []
         context_chars = 0
+        workspace = Path(workspace_root).expanduser().resolve()
+        active_failure_path_groups = _diagnostic_path_groups(feedback, workspace)
+        active_failure_origin_paths = {
+            path for group in active_failure_path_groups for path in group
+        }
         feedback_paths = list(
             dict.fromkeys(
                 str(issue.get("path", "")).strip()
@@ -254,6 +367,10 @@ class DeveloperAgent:
                 if str(issue.get("path", "")).strip()
             )
         )
+        for group in active_failure_path_groups:
+            for path in sorted(group):
+                if path not in feedback_paths:
+                    feedback_paths.append(path)
         feedback_runners = {
             str(result.get("runner", ""))
             for document in feedback_documents
@@ -275,46 +392,19 @@ class DeveloperAgent:
             for path in engineering_context_paths:
                 if path not in feedback_paths:
                     feedback_paths.append(path)
-        workspace = Path(workspace_root).expanduser().resolve()
         for document in feedback_documents:
-            for result in document.get("results", []):
-                if not isinstance(result, dict):
-                    continue
-                # 成功命令的 stderr 可能包含覆盖率写入警告或依赖栈路径；这些并非
-                # 待修复源码，不能据此读取 node_modules 并中断自动返工。
-                if str(result.get("status", "")).upper() not in {
-                    "FAILED",
-                    "TIMED_OUT",
-                }:
-                    continue
-                diagnostic_text = " ".join(
-                    str(result.get(key, ""))
-                    for key in ("stdout_excerpt", "stderr_excerpt")
-                )
-                for candidate in SOURCE_PATH_PATTERN.findall(diagnostic_text):
-                    candidate_path = Path(candidate.replace("\\", "/"))
-                    try:
-                        if candidate_path.is_absolute():
-                            relative = candidate_path.resolve().relative_to(workspace)
-                        else:
-                            relative = candidate_path
-                        normalized = relative.as_posix()
-                    except (OSError, ValueError):
-                        continue
-                    if normalized.split("/", 1)[0].casefold() in {
-                        "node_modules",
-                        "coverage",
-                        "dist",
-                        ".git",
-                    }:
-                        continue
-                    if normalized not in feedback_paths:
-                        feedback_paths.append(normalized)
+            for group in _diagnostic_path_groups(document, workspace):
+                for path in sorted(group):
+                    if path not in feedback_paths:
+                        feedback_paths.append(path)
+        inspected_cache: dict[str, FileInspectOutput] = {}
         for path in feedback_paths:
-            inspect_invocation = await self._tools.invoke(
-                "file.inspect", {"path": path}, context
-            )
-            inspected = FileInspectOutput.model_validate(inspect_invocation.output)
+            inspected = inspected_cache.get(path)
+            if inspected is None:
+                inspect_invocation = await self._tools.invoke(
+                    "file.inspect", {"path": path}, context
+                )
+                inspected = FileInspectOutput.model_validate(inspect_invocation.output)
             if not inspected.exists:
                 if path in engineering_context_paths:
                     source_context.append(
@@ -345,6 +435,28 @@ class DeveloperAgent:
             )
             searched_paths.append(path)
             context_chars += len(visible_content)
+            if path in active_failure_origin_paths:
+                for candidate in _relative_import_candidates(
+                    inspected.path,
+                    inspected.content or "",
+                ):
+                    if candidate in inspected_cache:
+                        dependency = inspected_cache[candidate]
+                    else:
+                        dependency_invocation = await self._tools.invoke(
+                            "file.inspect", {"path": candidate}, context
+                        )
+                        dependency = FileInspectOutput.model_validate(
+                            dependency_invocation.output
+                        )
+                        inspected_cache[candidate] = dependency
+                    if not dependency.exists:
+                        continue
+                    if candidate not in feedback_paths:
+                        feedback_paths.append(candidate)
+                    for group in active_failure_path_groups:
+                        if path in group:
+                            group.add(candidate)
         for hit in rag_output.hits:
             if hit.file_path in searched_paths:
                 continue
@@ -437,7 +549,15 @@ class DeveloperAgent:
             ),
             "feedback_history": [
                 _compact_feedback_document(item)
-                for item in (feedback_history or [])[-3:]
+                for item in history_documents[-3:]
+            ],
+            "active_failures": (
+                _compact_feedback_document(feedback).get("results", [])
+                if current_failure_query
+                else []
+            ),
+            "active_failure_path_groups": [
+                sorted(group) for group in active_failure_path_groups
             ],
         }
         payload_chars = len(
@@ -497,6 +617,12 @@ class DeveloperAgent:
                 plan,
                 context,
             )
+            conflicts.extend(
+                self._active_failure_coverage_conflicts(
+                    plan,
+                    active_failure_path_groups,
+                )
+            )
             if not conflicts:
                 break
             if plan_attempt == 0:
@@ -504,21 +630,21 @@ class DeveloperAgent:
                     progress,
                     58,
                     "重新规划代码修改",
-                    "文件内容已变化，正在基于最新内容重新生成安全修改计划",
+                    "上一份计划未通过文件状态或当前失败覆盖校验，正在安全重规划",
                 )
                 plan_payload = {
                     **plan_payload,
                     "plan_validation_feedback": conflicts,
                     "fresh_file_context": fresh_context,
                     "instruction": (
-                        "上一份修改计划与当前文件内容不一致。必须基于 fresh_file_context "
-                        "重新生成计划，不得继续使用失效的 old_text 或哈希。"
+                        "上一份修改计划未通过安全校验。必须逐项处理 "
+                        "plan_validation_feedback，并基于 source_context 与 "
+                        "fresh_file_context 重新生成计划；不得继续使用失效的 "
+                        "old_text 或哈希，也不得忽略当前失败命令。"
                     ),
                 }
         if plan is None or conflicts:
-            raise ValueError(
-                "代码修改计划与当前文件内容不一致，自动重新规划后仍无法安全应用"
-            )
+            raise ValueError("代码修改计划未通过安全校验，自动重新规划后仍无法应用")
 
         changes: list[FileChange] = []
         idempotent_paths: list[str] = []
@@ -671,6 +797,24 @@ class DeveloperAgent:
             except Exception as rollback_error:
                 errors.append(f"{path}：{rollback_error}")
         return errors
+
+    @staticmethod
+    def _active_failure_coverage_conflicts(
+        plan: DeveloperPlan,
+        path_groups: list[set[str]],
+    ) -> list[str]:
+        """拒绝与最新、可定位测试失败完全无关的返工计划。"""
+        mutation_paths = {mutation.path.replace("\\", "/") for mutation in plan.mutations}
+        conflicts: list[str] = []
+        for index, group in enumerate(path_groups, start=1):
+            normalized_group = {path.replace("\\", "/") for path in group}
+            if mutation_paths.isdisjoint(normalized_group):
+                conflicts.append(
+                    f"当前失败命令 {index} 尚未被修改计划覆盖；"
+                    f"必须检查并修改以下失败文件或其直接依赖之一："
+                    f"{', '.join(sorted(normalized_group))}"
+                )
+        return conflicts
 
     @staticmethod
     def _normalize_requirement_links(

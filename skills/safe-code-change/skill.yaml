@@ -1,0 +1,59 @@
+{
+  "name": "safe-code-change",
+  "version": "2.0.0",
+  "description": "在已有代码库中执行有证据、可回滚、经过测试与审查的最小代码变更",
+  "instructions_file": "SKILL.md",
+  "preconditions": [
+    "task_context_loaded",
+    "workspace_confirmed",
+    "search_code_called",
+    "target_source_read"
+  ],
+  "workflow": [
+    "understand_task",
+    "search_code",
+    "retrieve_context",
+    "plan_minimal_change",
+    "modify_code",
+    "run_tests",
+    "review_diff",
+    "verify"
+  ],
+  "allowed_tools": [
+    "project.context",
+    "rag.search",
+    "memory.search",
+    "code.search",
+    "file.read",
+    "file.inspect",
+    "file.create",
+    "file.replace",
+    "file.delete",
+    "terminal.run_test",
+    "git.status",
+    "git.diff"
+  ],
+  "postconditions": [
+    "diff_exists",
+    "tests_executed",
+    "tests_passed",
+    "verification_passed"
+  ],
+  "stop_rules": [
+    "budget_exceeded",
+    "same_tool_and_args_three_times",
+    "same_error_three_times",
+    "repair_round_limit",
+    "no_new_context"
+  ],
+  "resources": [],
+  "budget": {
+    "max_steps": 40,
+    "max_llm_calls": 15,
+    "max_tool_calls": 30,
+    "max_repair_rounds": 3,
+    "max_changed_files": 10,
+    "max_tokens": 200000,
+    "timeout_seconds": 600
+  }
+}

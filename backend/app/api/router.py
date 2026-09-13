@@ -892,4 +892,5 @@ def task_observability(
         tool_call_count=container.repository.tool_call_count(task_id),
         event_count=container.repository.event_count(task_id),
         model_usage=summarize_model_usage(events, governance),
+        revision_recovery=container.workflow.revision_recovery_status(events),
     )

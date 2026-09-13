@@ -2,7 +2,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.agents.developer import DeveloperAgent, _compact_feedback_document
+from backend.app.agents.developer import (
+    DeveloperAgent,
+    _compact_feedback_document,
+    _diagnostic_path_groups,
+    _failed_feedback_query,
+    _relative_import_candidates,
+)
 from backend.app.core.config import Settings
 from backend.app.domain.artifacts import DeveloperPlan, PRDArtifact
 from backend.app.infrastructure.llm.demo import DemoStructuredModel
@@ -28,6 +34,74 @@ def test_diagnosis_root_cause_is_preserved_for_developer_feedback() -> None:
     assert "setLoadingState" in compact["root_cause"]
     assert compact["requires_code_change"] is True
     assert "evidence" not in compact
+
+
+def test_latest_test_failure_drives_query_and_repair_path_coverage(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    feedback = {
+        "verdict": "FAILED",
+        "results": [
+            {
+                "command_id": "TST-002",
+                "runner": "NPM_TEST",
+                "status": "FAILED",
+                "stderr_excerpt": (
+                    "FAIL tests/levels.test.ts\n"
+                    "Expected: 1\nReceived: 2\n"
+                    "at tests/levels.test.ts:31:24"
+                ),
+            }
+        ],
+    }
+
+    assert "Expected: 1" in _failed_feedback_query(feedback)
+    groups = _diagnostic_path_groups(feedback, workspace)
+    assert groups == [{"tests/levels.test.ts"}]
+
+    dependencies = _relative_import_candidates(
+        "tests/levels.test.ts",
+        "import { levels } from '../src/game/levels';\n",
+    )
+    assert "src/game/levels.ts" in dependencies
+    groups[0].add("src/game/levels.ts")
+
+    unrelated_plan = DeveloperPlan.model_validate(
+        {
+            "summary": "继续修改旧审查问题",
+            "mutations": [
+                {
+                    "operation": "create",
+                    "path": "src/game/WinModal.ts",
+                    "content": "export {};\n",
+                    "requirement_ids": ["FR-001"],
+                    "reason": "旧审查意见",
+                }
+            ],
+        }
+    )
+    focused_plan = unrelated_plan.model_copy(
+        update={
+            "mutations": [
+                unrelated_plan.mutations[0].model_copy(
+                    update={"path": "src/game/levels.ts"}
+                )
+            ]
+        }
+    )
+
+    conflicts = DeveloperAgent._active_failure_coverage_conflicts(
+        unrelated_plan,
+        groups,
+    )
+    assert conflicts
+    assert "tests/levels.test.ts" in conflicts[0]
+    assert not DeveloperAgent._active_failure_coverage_conflicts(
+        focused_plan,
+        groups,
+    )
 
 
 def test_developer_converts_review_issue_ids_to_linked_requirements() -> None:

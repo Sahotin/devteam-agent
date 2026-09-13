@@ -56,6 +56,28 @@ def test_plan_only_evaluation_respects_execution_scope(
     assert report["overall_score"] >= 70
 
 
+def test_checkpoint_contains_v2_runtime_references(
+    client: TestClient, tmp_path: Path
+) -> None:
+    _project_id, task_id = _create_plan_task(client, tmp_path / "checkpoint-v2")
+    repository = client.app.state.container.repository
+
+    checkpoint = repository.latest_checkpoint(task_id)
+
+    assert checkpoint.snapshot["workflow_state"] == "COMPLETED"
+    assert checkpoint.snapshot["current_task"]
+    assert checkpoint.snapshot["current_step"] == "ARCHITECTURE"
+    assert checkpoint.snapshot["artifacts"]
+    assert "workspace" in checkpoint.snapshot
+    assert "budget_usage" in checkpoint.snapshot
+    assert "repair_round" in checkpoint.snapshot
+    assert checkpoint.snapshot["context_refs"]
+    assert any(
+        event.event_type == "CHECKPOINT_CREATED"
+        for event in repository.list_events(task_id)
+    )
+
+
 def test_completed_task_feedback_is_persisted_and_updates_project_summary(
     client: TestClient, tmp_path: Path
 ) -> None:

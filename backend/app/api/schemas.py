@@ -138,6 +138,12 @@ class ExecutionRequest(BaseModel):
         return payload
 
 
+class RevisionRecoveryStatus(BaseModel):
+    counts: dict[str, int]
+    limit: int = Field(ge=1)
+    compensation_available: dict[str, bool]
+
+
 class TaskObservabilityResponse(BaseModel):
     task: TaskRecord
     executions: list[ExecutionRecord]
@@ -146,3 +152,4 @@ class TaskObservabilityResponse(BaseModel):
     tool_call_count: int
     event_count: int
     model_usage: ModelUsageSummary
+    revision_recovery: RevisionRecoveryStatus

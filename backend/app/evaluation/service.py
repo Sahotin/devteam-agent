@@ -33,6 +33,7 @@ class EvaluationService:
             events,
             summarize_model_usage(events, governance),
             self._repository.get_evaluation_feedback(task_id),
+            self._repository.list_tool_calls(task_id),
         )
 
     def submit_feedback(

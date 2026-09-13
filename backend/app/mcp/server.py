@@ -31,7 +31,7 @@ def create_mcp_server(settings: Settings | None = None) -> MCPServer:
             "Read-only task-scoped context, hybrid code search and memory search. "
             "No file, shell, git, workflow or memory-write tools are exposed."
         ),
-        version="1.0.0",
+        version="2.0.0",
         middleware=[McpToolInputSecurityMiddleware()],
     )
 

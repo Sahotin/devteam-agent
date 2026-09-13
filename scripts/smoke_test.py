@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -9,7 +10,8 @@ from uuid import uuid4
 
 
 API_ROOT = os.getenv("DEVTEAM_API_ROOT", "http://127.0.0.1:8000/api/v1")
-WORKSPACE = os.getenv("DEVTEAM_SMOKE_WORKSPACE", "/workspace")
+DEFAULT_WORKSPACE = str(Path(__file__).resolve().parents[1] / "demo-workspace")
+WORKSPACE = os.getenv("DEVTEAM_SMOKE_WORKSPACE", DEFAULT_WORKSPACE)
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("DEVTEAM_SMOKE_REQUEST_TIMEOUT", "15"))
 EXECUTION_TIMEOUT_SECONDS = float(os.getenv("DEVTEAM_SMOKE_EXECUTION_TIMEOUT", "180"))
 POLL_INTERVAL_SECONDS = float(os.getenv("DEVTEAM_SMOKE_POLL_INTERVAL", "0.25"))
@@ -67,7 +69,7 @@ def main() -> None:
         {
             "name": f"Smoke Test {suffix}",
             "root_path": WORKSPACE,
-            "summary": "v1.0 端到端冒烟验证",
+            "summary": "v2.0 端到端冒烟验证",
         },
     )
     assert isinstance(project, dict)

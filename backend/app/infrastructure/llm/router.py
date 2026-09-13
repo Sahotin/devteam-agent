@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from time import perf_counter
 from types import MappingProxyType
@@ -11,6 +11,7 @@ from typing import Mapping
 
 from pydantic import BaseModel
 
+from backend.app.agent_runtime.scope import current_agent_run
 from backend.app.domain.enums import GovernanceLevel, ModelRoutingStrategy
 from backend.app.infrastructure.llm.base import StructuredModel, StructuredOutput
 from backend.app.infrastructure.llm.telemetry import (
@@ -39,6 +40,11 @@ class TaskModelRoutingContext:
     task_id: str
     governance_level: GovernanceLevel
     workflow_retry_attempt: int = 0
+    task_type: str = "GENERAL"
+    risk_score: int = 0
+    context_tokens: int = 0
+    repair_round: int = 0
+    remaining_token_budget: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +54,11 @@ class ModelRoutePlan:
     tiers: tuple[ModelTier, ...]
     workflow_retry_attempt: int
     reason: str
+    task_type: str = "GENERAL"
+    risk_score: int = 0
+    context_tokens: int = 0
+    repair_round: int = 0
+    remaining_token_budget: int | None = None
 
 
 ModelAuditSink = Callable[[str, str, dict], None]
@@ -121,6 +132,7 @@ class AgentModelRouter:
         profiles: Mapping[ModelTier, ModelProfile],
         assignments: Mapping[str, ModelTier] | None = None,
         strategy: ModelRoutingStrategy = ModelRoutingStrategy.DYNAMIC,
+        strong_context_threshold: int = 24_000,
     ) -> None:
         missing_models = set(ModelTier) - set(models)
         missing_profiles = set(ModelTier) - set(profiles)
@@ -131,6 +143,7 @@ class AgentModelRouter:
         self._profiles = dict(profiles)
         self._assignments = dict(assignments or DEFAULT_AGENT_TIERS)
         self._strategy = strategy
+        self._strong_context_threshold = strong_context_threshold
 
     @classmethod
     def uniform(
@@ -199,14 +212,31 @@ class AgentModelRouter:
                     f"评测对照策略 {self._strategy.value} 固定使用 {fixed.value} 档；"
                     "禁用自动升档以保证实验可复现"
                 ),
+                task_type=active.task_type if active else "GENERAL",
+                risk_score=active.risk_score if active else 0,
+                context_tokens=active.context_tokens if active else 0,
+                repair_round=active.repair_round if active else 0,
+                remaining_token_budget=(
+                    active.remaining_token_budget if active else None
+                ),
             )
         try:
             initial = GOVERNANCE_AGENT_TIERS[governance][agent_name]
         except KeyError as error:
             raise ValueError(f"尚未配置 Agent 模型档位：{agent_name}") from error
 
+        routing_reasons: list[str] = []
         if retry_attempt > 0:
             initial = _promote(initial)
+            routing_reasons.append("从检查点恢复，初始档位已提升")
+        if active and active.repair_round >= 2:
+            initial = _promote(initial)
+            routing_reasons.append("修复轮次达到 2，初始档位提升")
+        if active and active.context_tokens >= self._strong_context_threshold:
+            initial = _promote(initial)
+            routing_reasons.append(
+                f"Context 达到 {active.context_tokens} Token，初始档位提升"
+            )
         max_attempts = 3 if governance is GovernanceLevel.STRICT else 2
         tiers = [initial]
         for _ in range(1, max_attempts):
@@ -217,13 +247,18 @@ class AgentModelRouter:
             if promoted is tiers[-1]:
                 break
             tiers.append(promoted)
-        retry_reason = "；从检查点恢复，初始档位已提升" if retry_attempt > 0 else ""
+        detail = "；" + "；".join(routing_reasons) if routing_reasons else ""
         return ModelRoutePlan(
             agent_name=agent_name,
             governance_level=governance,
             tiers=tuple(tiers),
             workflow_retry_attempt=retry_attempt,
-            reason=f"{governance.value} 治理等级与 {agent_name} 职责联合决策{retry_reason}",
+            reason=f"{governance.value} 治理等级与 {agent_name} 职责联合决策{detail}",
+            task_type=active.task_type if active else "GENERAL",
+            risk_score=active.risk_score if active else 0,
+            context_tokens=active.context_tokens if active else 0,
+            repair_round=active.repair_round if active else 0,
+            remaining_token_budget=(active.remaining_token_budget if active else None),
         )
 
     def profile_for_agent(self, agent_name: str) -> ModelProfile:
@@ -270,12 +305,34 @@ class RoutedStructuredModel:
         output_schema: type[StructuredOutput],
     ) -> StructuredOutput:
         context = _routing_context.get()
+        runtime_scope = current_agent_run()
+        if runtime_scope is not None:
+            payload = runtime_scope.build_model_context(payload)
+            if context is not None:
+                context = replace(
+                    context,
+                    context_tokens=runtime_scope.last_context_tokens,
+                    repair_round=runtime_scope.budget.usage.repair_rounds,
+                    remaining_token_budget=max(
+                        0,
+                        runtime_scope.budget.budget.max_tokens
+                        - runtime_scope.budget.usage.tokens,
+                    ),
+                )
         plan = self._router.plan_for(self._agent_name, context)
         last_low_confidence_result: StructuredOutput | None = None
 
         for index, tier in enumerate(plan.tiers):
             attempt = index + 1
             profile = self._router._profiles[tier]
+            if runtime_scope is not None:
+                if runtime_scope.agent_name != self._agent_name:
+                    raise RuntimeError("active Agent run does not match model runtime")
+                runtime_scope.budget.record_llm_call()
+                runtime_scope.trace(
+                    "LLM_REQUEST",
+                    {"model_tier": tier.value, "attempt": attempt},
+                )
             usage_totals = {
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -306,6 +363,19 @@ class RoutedStructuredModel:
                     usage_totals,
                     started_at,
                 )
+                if runtime_scope is not None:
+                    runtime_scope.budget.record_tokens(attempt_metrics["total_tokens"])
+                    runtime_scope.trace(
+                        "LLM_RESPONSE",
+                        {
+                            "model_tier": tier.value,
+                            "attempt": attempt,
+                            "status": "FAILED",
+                            "error_type": type(error).__name__,
+                            **attempt_metrics,
+                        },
+                    )
+                    runtime_scope.stop_policy.observe_error(error)
                 recoverable = self._is_model_recoverable(error)
                 if attempt < len(plan.tiers) and recoverable:
                     self._audit(
@@ -334,6 +404,16 @@ class RoutedStructuredModel:
                 raise
 
             attempt_metrics = self._attempt_metrics(usage_totals, started_at)
+            if runtime_scope is not None:
+                runtime_scope.budget.record_tokens(attempt_metrics["total_tokens"])
+                runtime_scope.trace(
+                    "LLM_RESPONSE",
+                    {
+                        "model_tier": tier.value,
+                        "attempt": attempt,
+                        **attempt_metrics,
+                    },
+                )
             quality_signal = self._quality_escalation_signal(result)
             if quality_signal and attempt < len(plan.tiers):
                 last_low_confidence_result = result
@@ -405,6 +485,11 @@ class RoutedStructuredModel:
             "max_output_tokens": profile.max_output_tokens,
             "attempt": attempt,
             "max_attempts": len(plan.tiers),
+            "task_type": plan.task_type,
+            "risk_score": plan.risk_score,
+            "context_tokens": plan.context_tokens,
+            "repair_round": plan.repair_round,
+            "remaining_token_budget": plan.remaining_token_budget,
             "workflow_retry_attempt": plan.workflow_retry_attempt,
             "reason": plan.reason,
         }

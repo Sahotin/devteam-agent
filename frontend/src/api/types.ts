@@ -169,6 +169,11 @@ export interface Observability {
   tool_call_count: number;
   event_count: number;
   model_usage: ModelUsageSummary;
+  revision_recovery: {
+    counts: Record<"review" | "test" | "visual", number>;
+    limit: number;
+    compensation_available: Record<"review" | "test" | "visual", boolean>;
+  };
 }
 
 export interface ModelUsageBucket {
@@ -224,6 +229,17 @@ export interface TaskEvaluationReport {
   model_usage: ModelUsageSummary;
   quality_per_10k_tokens: number | null;
   feedback: TaskEvaluationFeedback | null;
+  trajectory: {
+    score: number;
+    searched_before_change: boolean | null;
+    tests_executed: boolean | null;
+    invalid_tool_calls: number;
+    repeated_tool_sequences: number;
+    budget_exceeded: boolean;
+    loop_detected: boolean;
+    skill_violations: number;
+    violations: string[];
+  } | null;
   evaluation_version: string;
 }
 

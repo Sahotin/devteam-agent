@@ -1,0 +1,12 @@
+from enum import StrEnum
+
+
+class AgentRunState(StrEnum):
+    RUNNING = "RUNNING"
+    WAITING_TOOL = "WAITING_TOOL"
+    VERIFYING = "VERIFYING"
+    REPAIRING = "REPAIRING"
+    WAITING_HUMAN = "WAITING_HUMAN"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"

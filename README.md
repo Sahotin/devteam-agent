@@ -1,10 +1,29 @@
-# DevTeam Agent
+# DevTeam Agent V2
 
 [![工程质量门禁](https://github.com/Sahotin/devteam-agent/actions/workflows/quality.yml/badge.svg)](https://github.com/Sahotin/devteam-agent/actions/workflows/quality.yml)
 
-DevTeam Agent 是一个面向软件研发场景、由结构化产物驱动的 Multi-Agent 协作系统。当前版本为 v1.0.0，已完成六个核心研发 Agent，以及故障诊断、视觉质量检查、受治理工具系统、代码 Hybrid RAG、分层 Memory、后台执行、实时可观测和 React 工作台。
+DevTeam Agent 是一个面向工程交付的、由结构化产物驱动的 Multi-Agent 软件研发系统。它把确定性 Workflow 与受控 Agent Harness 结合，并提供 Skill、只读 MCP Context、路径与测试沙箱、Checkpoint 恢复、Trace 和确定性 Agent Evaluation。系统强调 controlled、recoverable、observable、evaluatable，不以“完全自主软件工程师”为目标。
+
+```text
+User → Workflow State Machine → Agent Harness
+                               ├─ Context / Budget / Stop / Skill
+                               ├─ Model Router
+                               └─ MCP Context + ToolRegistry Actions
+                                            ↓
+                                  Workspace / Repository
+
+Trace ← Event / ToolCall          Checkpoint ← Workflow Gate
+Eval  ← Artifact / Trace / Usage
+```
 
 ## 已实现能力
+
+- 统一 Agent Harness：7 个 LLM 研发角色与确定性 Visual Reviewer 均通过统一 Run Scope 执行，记录 run_id、状态、Context、模型、工具、预算、验证和失败事件
+- 硬预算与停止策略：限制 Step、LLM/Tool 调用、Token、修复轮次、修改文件和超时，并检测重复工具参数、重复错误和无新增 Context
+- `safe-code-change` Skill：同时提供 Codex Host 指令和机器可校验配置，服务端强制工具白名单交集及写前检索/目标读取
+- 真实 stdio MCP Server：仅提供 `get_project_context`、`search_code`、`query_memory`，固定权限并全部经过 ToolRegistry
+- 统一 ContextBuilder：核心任务/失败证据优先，RAG、Memory 与历史 Context 在 Token 预算内确定性裁剪，并仅记录来源引用
+- 确定性 Tool Calling 轨迹评测：检查写前检索、写后测试、非法调用、重复调用、Skill、Budget 与 Loop 违反
 
 - Product、Designer、Architect、Developer、Reviewer、Tester 六个核心 Agent 协作，并由 Diagnostic 与 Visual Reviewer 承担专项诊断和确定性质量检查
 - PRD 与架构人工审批、审查与测试失败自动返工
@@ -51,6 +70,8 @@ DevTeam Agent 是一个面向软件研发场景、由结构化产物驱动的 Mu
 - 任务完成后支持保存用户满意度与成果验收反馈，主观反馈和客观工程质量分开记录
 - 项目级聚合 FAST、STANDARD、STRICT 的质量、成本和满意度，并在样本充足后给出可解释的校准建议；不会自动修改治理阈值
 - 内置 21 个版本化策略基准场景，覆盖局部修改、多页面功能、审查、支付、权限、数据迁移和核心重构，可重复验证路由决策
+
+V2 的真实边界与后续项见 [Resume Facts](docs/devteamagent_v2/resume_facts.md)。当前尚未实现每任务自动 Git Worktree、通用动态 DAG 和并行 Sub-Agent，不应把这些规划项描述成已完成。
 
 ## 工作流
 
@@ -159,7 +180,7 @@ Compose 会启动 PostgreSQL，等待数据库健康后执行 `alembic upgrade h
 
 默认使用 SQLite，数据库位于 `data/devteam_agent.db`。当前 Demo Model 用于稳定演示结构化工作流；它只会在目标项目的 `.devteam/tasks/` 下生成可追踪的实现计划，不会虚构业务代码或测试已经完成。
 
-Terminal Tool 默认使用本地受限执行器，仅接受 `PYTHON_COMPILE`、`PYTEST`、`UNITTEST`、`NPM_TEST` 和 `MAVEN_TEST` 五种预定义 Runner。也可以通过 `DEVTEAM_TERMINAL_EXECUTOR=docker` 启用关闭网络、限制资源和移除 Linux capabilities 的 Docker 执行器。
+Terminal Tool 默认使用本地受限执行器，仅接受 `NODE_CHECK`、`STATIC_PAGE_CHECK`、`PYTHON_COMPILE`、`PYTEST`、`UNITTEST`、`NPM_TEST`、`NPM_BUILD` 和 `MAVEN_TEST` 八种预定义 Runner。也可以通过 `DEVTEAM_TERMINAL_EXECUTOR=docker` 启用关闭网络、限制资源和移除 Linux capabilities 的 Docker 执行器。
 
 ## 验证
 

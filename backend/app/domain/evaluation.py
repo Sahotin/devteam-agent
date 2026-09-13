@@ -24,7 +24,24 @@ from backend.app.domain.enums import (
     TestVerdict,
 )
 from backend.app.domain.model_usage import ModelUsageSummary
-from backend.app.domain.models import ArtifactRecord, EventRecord, TaskRecord
+from backend.app.domain.models import (
+    ArtifactRecord,
+    EventRecord,
+    TaskRecord,
+    ToolCallRecord,
+)
+
+
+class TrajectoryEvaluation(BaseModel):
+    score: int = Field(ge=0, le=100)
+    searched_before_change: bool | None = None
+    tests_executed: bool | None = None
+    invalid_tool_calls: int = 0
+    repeated_tool_sequences: int = 0
+    budget_exceeded: bool = False
+    loop_detected: bool = False
+    skill_violations: int = 0
+    violations: list[str] = Field(default_factory=list)
 
 
 class EvaluationDimension(BaseModel):
@@ -64,7 +81,8 @@ class TaskEvaluationReport(BaseModel):
     model_usage: ModelUsageSummary
     quality_per_10k_tokens: float | None
     feedback: TaskEvaluationFeedbackRecord | None = None
-    evaluation_version: str = "EVAL_V1"
+    trajectory: TrajectoryEvaluation | None = None
+    evaluation_version: str = "EVAL_V2"
 
 
 class GovernanceEvaluationStats(BaseModel):
@@ -92,6 +110,7 @@ def evaluate_task(
     events: list[EventRecord],
     usage: ModelUsageSummary,
     feedback: TaskEvaluationFeedbackRecord | None = None,
+    tool_calls: list[ToolCallRecord] | None = None,
 ) -> TaskEvaluationReport:
     latest = _latest_artifacts(artifacts)
     scope = (
@@ -168,6 +187,98 @@ def evaluate_task(
         model_usage=usage,
         quality_per_10k_tokens=efficiency,
         feedback=feedback,
+        trajectory=evaluate_trajectory(events, tool_calls or []),
+    )
+
+
+def evaluate_trajectory(
+    events: list[EventRecord],
+    tool_calls: list[ToolCallRecord],
+) -> TrajectoryEvaluation:
+    """用确定性规则评估工具轨迹，不依赖 LLM 主观打分。"""
+    write_tools = {"file.create", "file.replace", "file.delete"}
+    search_tools = {"code.search", "rag.search"}
+    first_write = next(
+        (
+            index
+            for index, call in enumerate(tool_calls)
+            if call.tool_name in write_tools and call.status.value == "SUCCEEDED"
+        ),
+        None,
+    )
+    searched_before_change = (
+        None
+        if first_write is None
+        else any(
+            call.tool_name in search_tools and call.status.value == "SUCCEEDED"
+            for call in tool_calls[:first_write]
+        )
+    )
+    tests_executed = (
+        None
+        if first_write is None
+        else any(call.tool_name == "terminal.run_test" for call in tool_calls)
+    )
+    invalid_calls = sum(
+        call.status.value == "FAILED"
+        and bool(
+            call.error_message
+            and any(
+                marker in call.error_message.casefold()
+                for marker in ("not registered", "lacks permission", "validationerror")
+            )
+        )
+        for call in tool_calls
+    )
+    skill_violations = sum(
+        bool(call.error_message and "skill" in call.error_message.casefold())
+        for call in tool_calls
+    )
+    repeated_sequences = 0
+    for index in range(2, len(tool_calls)):
+        window = tool_calls[index - 2 : index + 1]
+        signatures = {(item.tool_name, repr(item.input)) for item in window}
+        if len(signatures) == 1:
+            repeated_sequences += 1
+    event_errors = "\n".join(
+        str(event.payload.get("error", "")) for event in events
+    ).casefold()
+    budget_exceeded = "budgetexceedederror" in event_errors
+    loop_detected = "loop_detected" in event_errors
+    violations: list[str] = []
+    if searched_before_change is False:
+        violations.append("修改代码前未成功执行代码检索")
+    if tests_executed is False:
+        violations.append("修改代码后未执行受控测试")
+    if invalid_calls:
+        violations.append(f"存在 {invalid_calls} 次非法或无效工具调用")
+    if repeated_sequences:
+        violations.append(f"存在 {repeated_sequences} 组重复工具调用")
+    if skill_violations:
+        violations.append(f"存在 {skill_violations} 次 Skill 约束违反")
+    if budget_exceeded:
+        violations.append("Agent Run 超出资源预算")
+    if loop_detected:
+        violations.append("Agent Run 触发循环检测")
+    penalty = (
+        (20 if searched_before_change is False else 0)
+        + (25 if tests_executed is False else 0)
+        + min(20, invalid_calls * 5)
+        + min(15, repeated_sequences * 5)
+        + min(20, skill_violations * 10)
+        + (15 if budget_exceeded else 0)
+        + (20 if loop_detected else 0)
+    )
+    return TrajectoryEvaluation(
+        score=max(0, 100 - penalty),
+        searched_before_change=searched_before_change,
+        tests_executed=tests_executed,
+        invalid_tool_calls=invalid_calls,
+        repeated_tool_sequences=repeated_sequences,
+        budget_exceeded=budget_exceeded,
+        loop_detected=loop_detected,
+        skill_violations=skill_violations,
+        violations=violations,
     )
 
 

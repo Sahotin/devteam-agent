@@ -313,13 +313,16 @@ function App() {
         ? "visual"
         : "review";
     const keyword = gate === "test" ? "test failure limit" : `${gate} revision limit`;
+    const authoritativeCount = observability?.revision_recovery?.counts[gate];
+    if (authoritativeCount !== undefined) return authoritativeCount;
     return events.filter(
       (event) =>
         event.event_type === "task.state_changed"
         && event.payload.retry === true
         && String(event.payload.previous_error ?? "").toLowerCase().includes(keyword),
     ).length;
-  }, [events, task?.error_message]);
+  }, [events, observability?.revision_recovery, task?.error_message]);
+  const revisionRecoveryLimit = observability?.revision_recovery?.limit ?? 3;
   const systemCompensationAvailable = useMemo(() => {
     const currentError = String(task?.error_message ?? "").toLowerCase();
     const gate = currentError.includes("test failure limit")
@@ -328,6 +331,9 @@ function App() {
         ? "visual"
         : "review";
     const keyword = gate === "test" ? "test failure limit" : `${gate} revision limit`;
+    const authoritativeAvailability =
+      observability?.revision_recovery?.compensation_available[gate];
+    if (authoritativeAvailability !== undefined) return authoritativeAvailability;
     const qualityRecoveries = events.filter(
       (event) =>
         event.event_type === "task.state_changed"
@@ -352,7 +358,7 @@ function App() {
         && event.event_type === "task.state_changed"
         && event.payload.compensating_recovery === true,
     );
-  }, [events, task?.error_message]);
+  }, [events, observability?.revision_recovery, task?.error_message]);
   const latestReviewIssues = useMemo(() => {
     const review = [...(observability?.artifacts ?? [])]
       .reverse()
@@ -976,9 +982,9 @@ function App() {
                       )}
                       {failureInfo?.recoveryMode !== "REVISION_LIMIT" && failureInfo?.recoveryMode !== "WORKSPACE" ? (
                         <button className={failureInfo?.recoveryMode === "ENVIRONMENT" ? "secondary-button" : "primary-button"} disabled={busy} onClick={() => void control("retry")}>{busy ? "正在恢复…" : failureInfo?.retryLabel ?? "恢复并重新执行"}</button>
-                      ) : revisionRecoveryCount < 3 ? (
+                      ) : revisionRecoveryCount < revisionRecoveryLimit ? (
                         <button className="primary-button" disabled={busy} onClick={() => void control("retry")}>
-                          {busy ? "正在准备修复…" : `执行重复问题根因修复（${revisionRecoveryCount + 1}/3）`}
+                          {busy ? "正在准备修复…" : `执行重复问题根因修复（${revisionRecoveryCount + 1}/${revisionRecoveryLimit}）`}
                         </button>
                       ) : systemCompensationAvailable ? (
                         <button className="primary-button" disabled={busy} onClick={() => void control("retry")}>

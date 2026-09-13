@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import Engine
 
@@ -12,6 +13,9 @@ from backend.app.agents.product import ProductAgent
 from backend.app.agents.reviewer import ReviewerAgent
 from backend.app.agents.tester import TesterAgent
 from backend.app.agents.visual_reviewer import VisualReviewerAgent
+from backend.app.agent_runtime.budget import AgentBudget
+from backend.app.agent_runtime.harness import AgentHarness
+from backend.app.agent_runtime.skills import SkillRegistry
 from backend.app.core.config import Settings
 from backend.app.infrastructure.database.repository import SqlAlchemyRepository
 from backend.app.infrastructure.database.session import (
@@ -74,6 +78,8 @@ class ApplicationContainer:
     runtime_manager: ProjectRuntimeManager
     model_router: AgentModelRouter
     evaluation_service: EvaluationService
+    agent_harness: AgentHarness
+    skill_registry: SkillRegistry
 
     @classmethod
     def build(
@@ -104,6 +110,24 @@ class ApplicationContainer:
         )
         memory_service = MemoryService(repository, embedding_provider)
         runtime_manager = ProjectRuntimeManager(repository)
+        skill_registry = SkillRegistry(Path(settings.skill_root))
+        skill_registry.load()
+        agent_harness = AgentHarness(
+            trace_sink=repository.record_event,
+            default_budget=AgentBudget(
+                max_steps=settings.agent_max_steps,
+                max_llm_calls=settings.agent_max_llm_calls,
+                max_tool_calls=settings.agent_max_tool_calls,
+                max_repair_rounds=settings.agent_max_repair_rounds,
+                max_changed_files=settings.agent_max_changed_files,
+                max_tokens=settings.agent_max_tokens,
+                timeout_seconds=settings.agent_timeout_seconds,
+            ),
+            skill_registry=skill_registry,
+            repeated_tool_limit=settings.agent_repeated_action_limit,
+            repeated_error_limit=settings.agent_repeated_action_limit,
+            max_context_tokens=settings.agent_context_max_tokens,
+        )
         tools = ToolRegistry(repository)
         tools.register(FileReadTool())
         tools.register(FileInspectTool())
@@ -171,6 +195,7 @@ class ApplicationContainer:
             tools=tools,
             memory_service=memory_service,
             runtime_manager=runtime_manager,
+            agent_harness=agent_harness,
         )
         execution_manager = ExecutionManager(
             repository,
@@ -190,6 +215,8 @@ class ApplicationContainer:
             runtime_manager=runtime_manager,
             model_router=model_router,
             evaluation_service=evaluation_service,
+            agent_harness=agent_harness,
+            skill_registry=skill_registry,
         )
 
     @classmethod
@@ -212,6 +239,7 @@ class ApplicationContainer:
         return AgentModelRouter(
             models=models,
             profiles=profiles,
+            strong_context_threshold=settings.agent_model_strong_context_tokens,
             strategy=ModelRoutingStrategy(settings.model_routing_strategy),
         )
 

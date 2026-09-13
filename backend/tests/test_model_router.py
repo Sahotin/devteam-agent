@@ -195,6 +195,33 @@ def test_checkpoint_retry_promotes_initial_tier() -> None:
     assert "初始档位已提升" in plan.reason
 
 
+def test_large_context_and_repair_round_promote_initial_tier() -> None:
+    model = RecordingModel(RouteResult(value="ok"))
+    router = build_runtime_router(model, model, model)
+
+    context_plan = router.plan_for(
+        "product-agent",
+        TaskModelRoutingContext(
+            "task-context",
+            GovernanceLevel.FAST,
+            context_tokens=24_000,
+        ),
+    )
+    repair_plan = router.plan_for(
+        "tester-agent",
+        TaskModelRoutingContext(
+            "task-repair",
+            GovernanceLevel.FAST,
+            repair_round=2,
+        ),
+    )
+
+    assert context_plan.tiers[0] is ModelTier.STANDARD
+    assert "Context" in context_plan.reason
+    assert repair_plan.tiers[0] is ModelTier.STANDARD
+    assert "修复轮次" in repair_plan.reason
+
+
 def test_fixed_strategy_uses_one_tier_without_automatic_escalation() -> None:
     models = {
         tier: RecordingModel(RouteResult(value=tier.value)) for tier in ModelTier

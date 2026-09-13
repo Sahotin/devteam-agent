@@ -11,6 +11,8 @@ from backend.app.agents.product import ProductAgent
 from backend.app.agents.reviewer import ReviewerAgent
 from backend.app.agents.tester import TesterAgent
 from backend.app.agents.visual_reviewer import VisualReviewerAgent
+from backend.app.agent_runtime.harness import AgentHarness, AgentRunHalted
+from backend.app.agent_runtime.state import AgentRunState
 from backend.app.domain.artifacts import (
     ArchitectureArtifact,
     CodeChangeArtifact,
@@ -36,7 +38,11 @@ from backend.app.domain.enums import (
 )
 from backend.app.domain.models import ArtifactRecord, TaskRecord
 from backend.app.domain.memory import MemorySearchQuery
-from backend.app.domain.state_machine import PAUSABLE_STATES, TERMINAL_STATES
+from backend.app.domain.state_machine import (
+    ALLOWED_TRANSITIONS,
+    PAUSABLE_STATES,
+    TERMINAL_STATES,
+)
 from backend.app.infrastructure.database.repository import SqlAlchemyRepository
 from backend.app.infrastructure.database.repository import EntityNotFoundError
 from backend.app.infrastructure.llm.router import (
@@ -82,6 +88,7 @@ class WorkflowService:
         tools: ToolRegistry,
         memory_service: MemoryService,
         runtime_manager: ProjectRuntimeManager,
+        agent_harness: AgentHarness,
     ) -> None:
         self._repository = repository
         self._product_agent = product_agent
@@ -95,6 +102,7 @@ class WorkflowService:
         self._tools = tools
         self._memory_service = memory_service
         self._runtime_manager = runtime_manager
+        self._agent_harness = agent_harness
 
     async def start(
         self, task_id: str, progress: ProgressReporter | None = None
@@ -200,7 +208,7 @@ class WorkflowService:
                 and not compensating_recovery
             ):
                 raise ValueError(
-                    "manual revision recovery limit exceeded; "
+                    "重复问题根因修复次数已达上限；"
                     "请提交问题并创建独立修复任务，以便重新诊断根因"
                 )
         else:
@@ -243,6 +251,54 @@ class WorkflowService:
             },
             error_message=None,
         )
+
+    @staticmethod
+    def revision_recovery_status(events: list) -> dict:
+        """基于完整审计事件汇总返工恢复额度，供前端显示权威状态。"""
+        counts: dict[str, int] = {}
+        compensation_available: dict[str, bool] = {}
+        for gate in ("review", "test", "visual"):
+            keyword = WorkflowService._gate_limit_keyword(gate)
+            quality_recoveries = [
+                event
+                for event in events
+                if event.event_type == "task.state_changed"
+                and event.payload.get("retry") is True
+                and event.payload.get("compensating_recovery") is not True
+                and keyword
+                in str(event.payload.get("previous_error", "")).lower()
+            ]
+            counts[gate] = len(quality_recoveries)
+            last_quality_recovery_id = max(
+                (event.id for event in quality_recoveries),
+                default=0,
+            )
+            system_failures = [
+                event
+                for event in events
+                if event.id > last_quality_recovery_id
+                and event.event_type == "task.state_changed"
+                and event.payload.get("to") == TaskState.FAILED.value
+                and event.payload.get("error_type")
+                not in {None, "RuntimeError", "WorkflowExecutionError"}
+            ]
+            latest_system_failure_id = (
+                system_failures[-1].id if system_failures else None
+            )
+            compensation_available[gate] = bool(
+                latest_system_failure_id
+                and not any(
+                    event.id > latest_system_failure_id
+                    and event.event_type == "task.state_changed"
+                    and event.payload.get("compensating_recovery") is True
+                    for event in events
+                )
+            )
+        return {
+            "counts": counts,
+            "limit": MAX_MANUAL_REVISION_RECOVERIES,
+            "compensation_available": compensation_available,
+        }
 
     async def git_status(self, task_id: str) -> GitStatusOutput:
         invocation = await self._invoke_git(task_id, "git.status", {})
@@ -599,13 +655,21 @@ class WorkflowService:
         project = self._repository.get_project(task.project_id)
         memory_context = self._memory_context(task, task.requirement)
         with self._model_routing_context(task):
-            prd = await self._product_agent.run(
-                requirement=task.requirement,
-                project_summary=project.summary,
-                feedback=feedback,
-                memory_context=memory_context,
-                progress=progress,
+            run = await self._agent_harness.run_phase(
+                task_id=task.id,
+                agent_name=self._product_agent.name,
+                high_risk=self._is_high_risk(task),
+                operation=lambda: self._product_agent.run(
+                    requirement=task.requirement,
+                    project_summary=project.summary,
+                    feedback=feedback,
+                    memory_context=memory_context,
+                    progress=progress,
+                ),
             )
+            prd = run.output
+        if prd is None:
+            raise RuntimeError("Product Agent 未返回需求产物")
         report_progress(progress, 90, "保存 PRD", "正在持久化产物与检查点")
         artifact = self._repository.save_artifact(
             task.id,
@@ -677,14 +741,23 @@ class WorkflowService:
                 "limitation": interaction_probe.limitation,
             }
             with self._model_routing_context(task):
-                diagnosis = await self._diagnostic_agent.run(
+                run = await self._agent_harness.run_phase(
                     task_id=task.id,
-                    workspace_root=project.root_path,
-                    report=task.requirement,
-                    project_summary=project.summary,
-                    runtime_evidence=runtime_evidence,
-                    progress=progress,
+                    agent_name=self._diagnostic_agent.name,
+                    high_risk=self._is_high_risk(task),
+                    allowed_tools=frozenset({"rag.search", "memory.search"}),
+                    operation=lambda: self._diagnostic_agent.run(
+                        task_id=task.id,
+                        workspace_root=project.root_path,
+                        report=task.requirement,
+                        project_summary=project.summary,
+                        runtime_evidence=runtime_evidence,
+                        progress=progress,
+                    ),
                 )
+                diagnosis = run.output
+            if diagnosis is None:
+                raise RuntimeError("Diagnostic Agent 未返回诊断产物")
             if (
                 interaction_probe.attempted
                 and interaction_probe.found
@@ -737,12 +810,20 @@ class WorkflowService:
         prd_record = self._repository.latest_artifact(task.id, ArtifactType.PRD)
         prd = PRDArtifact.model_validate(prd_record.content)
         with self._model_routing_context(task):
-            ui_design = await self._designer_agent.run(
-                prd=prd,
-                project_summary=project.summary,
-                feedback=feedback,
-                progress=progress,
+            design_run = await self._agent_harness.run_phase(
+                task_id=task.id,
+                agent_name=self._designer_agent.name,
+                high_risk=self._is_high_risk(task),
+                operation=lambda: self._designer_agent.run(
+                    prd=prd,
+                    project_summary=project.summary,
+                    feedback=feedback,
+                    progress=progress,
+                ),
             )
+            ui_design = design_run.output
+        if ui_design is None:
+            raise RuntimeError("Designer Agent 未返回 UI/UX 产物")
         design_artifact = self._repository.save_artifact(
             task.id,
             ArtifactType.UI_DESIGN,
@@ -754,14 +835,22 @@ class WorkflowService:
             f"{prd.title} {' '.join(item.description for item in prd.requirements)}",
         )
         with self._model_routing_context(task):
-            architecture = await self._architect_agent.run(
-                prd=prd,
-                ui_design=ui_design,
-                project_summary=project.summary,
-                feedback=feedback,
-                memory_context=memory_context,
-                progress=progress,
+            architecture_run = await self._agent_harness.run_phase(
+                task_id=task.id,
+                agent_name=self._architect_agent.name,
+                high_risk=self._is_high_risk(task),
+                operation=lambda: self._architect_agent.run(
+                    prd=prd,
+                    ui_design=ui_design,
+                    project_summary=project.summary,
+                    feedback=feedback,
+                    memory_context=memory_context,
+                    progress=progress,
+                ),
             )
+            architecture = architecture_run.output
+        if architecture is None:
+            raise RuntimeError("Architect Agent 未返回架构产物")
         report_progress(progress, 90, "保存架构设计", "正在持久化产物与检查点")
         artifact = self._repository.save_artifact(
             task.id,
@@ -820,20 +909,47 @@ class WorkflowService:
             }
         ][-6:]
         with self._model_routing_context(task):
-            code_change = await self._developer_agent.run(
+            developer_run = await self._agent_harness.run_phase(
                 task_id=task.id,
-                workspace_root=project.root_path,
-                prd=prd,
-                architecture=architecture,
-                ui_design=ui_design,
-                architecture_version=architecture_record.version,
-                implementation_revision=implementation_revision,
-                feedback=(
-                    feedback.model_dump(mode="json") if feedback else None
+                agent_name=self._developer_agent.name,
+                high_risk=self._is_high_risk(task),
+                skill_name="safe-code-change",
+                repair_round=max(
+                    0,
+                    implementation_revision
+                    - 1
+                    - self._manual_recovery_count(task.id),
                 ),
-                feedback_history=feedback_history,
-                progress=progress,
+                allowed_tools=frozenset(
+                    {
+                        "rag.search",
+                        "memory.search",
+                        "code.search",
+                        "file.inspect",
+                        "file.read",
+                        "file.create",
+                        "file.replace",
+                        "file.delete",
+                    }
+                ),
+                operation=lambda: self._developer_agent.run(
+                    task_id=task.id,
+                    workspace_root=project.root_path,
+                    prd=prd,
+                    architecture=architecture,
+                    ui_design=ui_design,
+                    architecture_version=architecture_record.version,
+                    implementation_revision=implementation_revision,
+                    feedback=(
+                        feedback.model_dump(mode="json") if feedback else None
+                    ),
+                    feedback_history=feedback_history,
+                    progress=progress,
+                ),
             )
+            code_change = developer_run.output
+        if code_change is None:
+            raise RuntimeError("Developer Agent 未返回代码变更产物")
         report_progress(progress, 92, "保存代码产物", "正在记录文件哈希与检查点")
         artifact = self._repository.save_artifact(
             task.id,
@@ -882,15 +998,24 @@ class WorkflowService:
                 progress,
             )
         with self._model_routing_context(task):
-            review = await self._reviewer_agent.run(
+            reviewer_run = await self._agent_harness.run_phase(
                 task_id=task.id,
-                workspace_root=project.root_path,
-                prd=prd,
-                architecture=architecture,
-                ui_design=ui_design,
-                code_change=code_change,
-                progress=progress,
+                agent_name=self._reviewer_agent.name,
+                high_risk=self._is_high_risk(task),
+                allowed_tools=frozenset({"memory.search", "file.read"}),
+                operation=lambda: self._reviewer_agent.run(
+                    task_id=task.id,
+                    workspace_root=project.root_path,
+                    prd=prd,
+                    architecture=architecture,
+                    ui_design=ui_design,
+                    code_change=code_change,
+                    progress=progress,
+                ),
             )
+            review = reviewer_run.output
+        if review is None:
+            raise RuntimeError("Reviewer Agent 未返回审查产物")
         report_progress(progress, 93, "保存审查报告", "正在执行质量门禁判断")
         artifact = self._repository.save_artifact(
             task.id,
@@ -1054,16 +1179,25 @@ class WorkflowService:
             self._repository.latest_artifact(task.id, ArtifactType.REVIEW).content
         )
         with self._model_routing_context(task):
-            report = await self._tester_agent.run(
+            tester_run = await self._agent_harness.run_phase(
                 task_id=task.id,
-                workspace_root=project.root_path,
-                prd=prd,
-                architecture=architecture,
-                ui_design=ui_design,
-                code_change=code_change,
-                review=review,
-                progress=progress,
+                agent_name=self._tester_agent.name,
+                high_risk=self._is_high_risk(task),
+                allowed_tools=frozenset({"memory.search", "terminal.run_test"}),
+                operation=lambda: self._tester_agent.run(
+                    task_id=task.id,
+                    workspace_root=project.root_path,
+                    prd=prd,
+                    architecture=architecture,
+                    ui_design=ui_design,
+                    code_change=code_change,
+                    review=review,
+                    progress=progress,
+                ),
             )
+            report = tester_run.output
+        if report is None:
+            raise RuntimeError("Tester Agent 未返回测试产物")
         report_progress(progress, 93, "汇总测试结果", "正在执行最终质量门禁")
         artifact = self._repository.save_artifact(
             task.id,
@@ -1073,18 +1207,26 @@ class WorkflowService:
         )
 
         if report.verdict is TestVerdict.PASSED:
-            visual_report = await self._visual_reviewer_agent.run(
+            visual_run = await self._agent_harness.run_phase(
                 task_id=task.id,
-                workspace_root=project.root_path,
-                ui_design=ui_design,
-                code_change=code_change,
-                interaction_report=(
-                    task.requirement
-                    if self._iteration_kind(task.id) is IterationKind.BUG_FIX
-                    else None
+                agent_name=self._visual_reviewer_agent.name,
+                high_risk=self._is_high_risk(task),
+                operation=lambda: self._visual_reviewer_agent.run(
+                    task_id=task.id,
+                    workspace_root=project.root_path,
+                    ui_design=ui_design,
+                    code_change=code_change,
+                    interaction_report=(
+                        task.requirement
+                        if self._iteration_kind(task.id) is IterationKind.BUG_FIX
+                        else None
+                    ),
+                    progress=progress,
                 ),
-                progress=progress,
             )
+            visual_report = visual_run.output
+            if visual_report is None:
+                raise RuntimeError("Visual Reviewer Agent 未返回视觉验收产物")
             visual_artifact = self._repository.save_artifact(
                 task.id,
                 ArtifactType.VISUAL_REPORT,
@@ -1226,17 +1368,90 @@ class WorkflowService:
         )
 
     def _checkpoint(self, task: TaskRecord, artifact: ArtifactRecord) -> None:
-        self._repository.save_checkpoint(
+        events = self._repository.list_events(task.id)
+        last_agent_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.event_type == "AGENT_COMPLETED"
+            ),
+            None,
+        )
+        context_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.event_type == "CONTEXT_BUILT"
+            ),
+            None,
+        )
+        project = self._repository.get_project(task.project_id)
+        artifacts = self._repository.list_artifacts(task.id)
+        checkpoint = self._repository.save_checkpoint(
             task,
             {
                 "task_id": task.id,
-                "state": task.state.value,
+                "workflow_state": task.state.value,
                 "state_version": task.state_version,
+                "agent_state": (
+                    last_agent_event.payload.get("agent_state")
+                    if last_agent_event
+                    else None
+                ),
+                "run_id": (
+                    last_agent_event.payload.get("run_id")
+                    if last_agent_event
+                    else None
+                ),
+                "current_task": task.requirement,
+                "current_step": artifact.type.value,
                 "latest_artifact": {
                     "id": artifact.id,
                     "type": artifact.type.value,
                     "version": artifact.version,
                 },
+                "artifacts": [
+                    {
+                        "id": item.id,
+                        "type": item.type.value,
+                        "version": item.version,
+                    }
+                    for item in artifacts
+                ],
+                "workspace": {
+                    "project_id": project.id,
+                    "root_path": project.root_path,
+                },
+                "budget_usage": (
+                    last_agent_event.payload.get("usage", {})
+                    if last_agent_event
+                    else {}
+                ),
+                "repair_round": max(
+                    0,
+                    len(
+                        [
+                            item
+                            for item in artifacts
+                            if item.type is ArtifactType.CODE_CHANGE
+                        ]
+                    )
+                    - 1,
+                ),
+                "context_refs": (
+                    context_event.payload.get("source_ids", [])
+                    if context_event
+                    else []
+                ),
+            },
+        )
+        self._repository.record_event(
+            task.id,
+            "CHECKPOINT_CREATED",
+            {
+                "checkpoint_id": checkpoint.id,
+                "workflow_state": task.state.value,
+                "state_version": task.state_version,
             },
         )
         self._memory_service.record_stage_memory(task, artifact)
@@ -1368,11 +1583,22 @@ class WorkflowService:
             if task.policy is not None
             else GovernanceLevel.STANDARD
         )
+        iteration_kind = self._iteration_kind(task.id)
         return task_model_routing(
             TaskModelRoutingContext(
                 task_id=task.id,
                 governance_level=governance,
                 workflow_retry_attempt=retry_attempt,
+                task_type=(
+                    iteration_kind.value
+                    if iteration_kind is not None
+                    else (
+                        task.policy.execution_scope.value
+                        if task.policy is not None
+                        else "AUTO"
+                    )
+                ),
+                risk_score=task.policy.risk_score if task.policy else 0,
             )
         )
 
@@ -1424,9 +1650,53 @@ class WorkflowService:
                 return str(value)
         return None
 
+    def _manual_recovery_count(self, task_id: str) -> int:
+        return sum(
+            1
+            for event in self._repository.list_events(task_id)
+            if event.event_type == "task.state_changed"
+            and event.payload.get("retry") is True
+        )
+
+    @staticmethod
+    def _is_high_risk(task: TaskRecord) -> bool:
+        return bool(
+            task.policy
+            and task.policy.governance_level is GovernanceLevel.STRICT
+        )
+
     def _fail(self, task_id: str, error: Exception) -> None:
         task = self._repository.get_task(task_id)
         message = f"{type(error).__name__}: {error}"[:2000]
+        if (
+            isinstance(error, AgentRunHalted)
+            and error.result.state is AgentRunState.WAITING_HUMAN
+            and TaskState.PAUSED in ALLOWED_TRANSITIONS.get(task.state, set())
+        ):
+            paused = self._repository.transition_task(
+                task.id,
+                TaskState.PAUSED,
+                expected_version=task.state_version,
+                event_payload={
+                    "reason": message,
+                    "run_id": error.result.run_id,
+                    "agent_state": error.result.state.value,
+                },
+            )
+            self._repository.save_checkpoint(
+                paused,
+                {
+                    "task_id": paused.id,
+                    "workflow_state": paused.state.value,
+                    "state_version": paused.state_version,
+                    "resume_state": task.state.value,
+                    "agent_state": error.result.state.value,
+                    "run_id": error.result.run_id,
+                    "budget_usage": error.result.usage.model_dump(),
+                    "reason": message,
+                },
+            )
+            return
         self._repository.transition_task(
             task.id,
             TaskState.FAILED,

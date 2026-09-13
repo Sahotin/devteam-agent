@@ -85,6 +85,17 @@ export function EvaluationPanel({ report, projectSummary, onReportChange }: Eval
         </section>
 
         <div className="evaluation-insights">
+          {report.trajectory && (
+            <section>
+              <h3>Agent 工具轨迹 · {report.trajectory.score} 分</h3>
+              {report.trajectory.violations.length > 0 ? (
+                <ul>{report.trajectory.violations.map((item) => <li key={item}>{item}</li>)}</ul>
+              ) : (
+                <p>未检测到写前检索、测试、权限、重复调用或预算方面的轨迹违规。</p>
+              )}
+              <small>该分数由审计事件和 ToolCall 的确定性规则计算，不使用 LLM Judge。</small>
+            </section>
+          )}
           <section>
             <h3>改进建议</h3>
             {report.recommendations.length > 0 ? (

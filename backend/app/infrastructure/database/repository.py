@@ -401,15 +401,24 @@ class SqlAlchemyRepository:
             ).all()
             return [self._artifact_record(row) for row in rows]
 
-    def save_checkpoint(self, task: TaskRecord, snapshot: dict) -> None:
+    def save_checkpoint(self, task: TaskRecord, snapshot: dict) -> CheckpointRecord:
         with self._session() as session:
-            session.add(
-                CheckpointRow(
-                    task_id=task.id,
-                    state=task.state.value,
-                    state_version=task.state_version,
-                    snapshot=snapshot,
-                )
+            row = CheckpointRow(
+                task_id=task.id,
+                state=task.state.value,
+                state_version=task.state_version,
+                snapshot=snapshot,
+            )
+            session.add(row)
+            session.flush()
+            session.refresh(row)
+            return CheckpointRecord(
+                id=row.id,
+                task_id=row.task_id,
+                state=TaskState(row.state),
+                state_version=row.state_version,
+                snapshot=row.snapshot,
+                created_at=row.created_at,
             )
 
     def latest_checkpoint(self, task_id: str) -> CheckpointRecord:

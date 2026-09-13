@@ -70,6 +70,17 @@ class Settings:
     deepseek_max_retries: int = 2
     database_auto_create: bool = True
     log_json: bool = False
+    agent_max_steps: int = 40
+    agent_max_llm_calls: int = 15
+    agent_max_tool_calls: int = 30
+    agent_max_repair_rounds: int = 3
+    agent_max_changed_files: int = 10
+    agent_max_tokens: int = 200_000
+    agent_timeout_seconds: float = 600
+    agent_context_max_tokens: int = 32_000
+    agent_repeated_action_limit: int = 3
+    agent_model_strong_context_tokens: int = 24_000
+    skill_root: str = "./skills"
 
     def __post_init__(self) -> None:
         if self.llm_provider not in {"demo", "openai", "deepseek"}:
@@ -122,6 +133,24 @@ class Settings:
                 raise ValueError(f"{name} must be at least 1024")
         if self.deepseek_max_retries < 0:
             raise ValueError("DEVTEAM_DEEPSEEK_MAX_RETRIES cannot be negative")
+        positive_agent_limits = {
+            "DEVTEAM_AGENT_MAX_STEPS": self.agent_max_steps,
+            "DEVTEAM_AGENT_MAX_LLM_CALLS": self.agent_max_llm_calls,
+            "DEVTEAM_AGENT_MAX_TOOL_CALLS": self.agent_max_tool_calls,
+            "DEVTEAM_AGENT_MAX_TOKENS": self.agent_max_tokens,
+            "DEVTEAM_AGENT_CONTEXT_MAX_TOKENS": self.agent_context_max_tokens,
+            "DEVTEAM_AGENT_REPEATED_ACTION_LIMIT": self.agent_repeated_action_limit,
+            "DEVTEAM_AGENT_MODEL_STRONG_CONTEXT_TOKENS": (
+                self.agent_model_strong_context_tokens
+            ),
+        }
+        for name, value in positive_agent_limits.items():
+            if value < 1:
+                raise ValueError(f"{name} must be at least one")
+        if self.agent_max_repair_rounds < 0 or self.agent_max_changed_files < 0:
+            raise ValueError("Agent repair and changed-file limits cannot be negative")
+        if self.agent_timeout_seconds <= 0:
+            raise ValueError("DEVTEAM_AGENT_TIMEOUT_SECONDS must be positive")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -235,4 +264,34 @@ class Settings:
             log_json=parse_bool(
                 "DEVTEAM_LOG_JSON", getenv("DEVTEAM_LOG_JSON"), False
             ),
+            agent_max_steps=int(getenv("DEVTEAM_AGENT_MAX_STEPS", "40") or "40"),
+            agent_max_llm_calls=int(
+                getenv("DEVTEAM_AGENT_MAX_LLM_CALLS", "15") or "15"
+            ),
+            agent_max_tool_calls=int(
+                getenv("DEVTEAM_AGENT_MAX_TOOL_CALLS", "30") or "30"
+            ),
+            agent_max_repair_rounds=int(
+                getenv("DEVTEAM_AGENT_MAX_REPAIR_ROUNDS", "3") or "3"
+            ),
+            agent_max_changed_files=int(
+                getenv("DEVTEAM_AGENT_MAX_CHANGED_FILES", "10") or "10"
+            ),
+            agent_max_tokens=int(
+                getenv("DEVTEAM_AGENT_MAX_TOKENS", "200000") or "200000"
+            ),
+            agent_timeout_seconds=float(
+                getenv("DEVTEAM_AGENT_TIMEOUT_SECONDS", "600") or "600"
+            ),
+            agent_context_max_tokens=int(
+                getenv("DEVTEAM_AGENT_CONTEXT_MAX_TOKENS", "32000") or "32000"
+            ),
+            agent_repeated_action_limit=int(
+                getenv("DEVTEAM_AGENT_REPEATED_ACTION_LIMIT", "3") or "3"
+            ),
+            agent_model_strong_context_tokens=int(
+                getenv("DEVTEAM_AGENT_MODEL_STRONG_CONTEXT_TOKENS", "24000")
+                or "24000"
+            ),
+            skill_root=getenv("DEVTEAM_SKILL_ROOT", "./skills") or "./skills",
         )
