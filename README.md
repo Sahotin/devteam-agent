@@ -1,8 +1,34 @@
 # DevTeam Agent V2
 
 [![工程质量门禁](https://github.com/Sahotin/devteam-agent/actions/workflows/quality.yml/badge.svg)](https://github.com/Sahotin/devteam-agent/actions/workflows/quality.yml)
+![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827)
+![MCP](https://img.shields.io/badge/MCP-stdio%20read--only-6366F1)
+![Tests](https://img.shields.io/badge/backend_tests-205%20passed-22C55E)
 
 DevTeam Agent 是一个面向工程交付的、由结构化产物驱动的 Multi-Agent 软件研发系统。它把确定性 Workflow 与受控 Agent Harness 结合，并提供 Skill、只读 MCP Context、路径与测试沙箱、Checkpoint 恢复、Trace 和确定性 Agent Evaluation。系统强调 controlled、recoverable、observable、evaluatable，不以“完全自主软件工程师”为目标。
+
+## 运行效果
+
+<p align="center">
+  <img src="docs/assets/devteam-agent-workflow.gif" width="1024" alt="DevTeam Agent 从任务创建、需求审批、架构选择、代码实现、代码审查到测试交付的真实工作流演示" />
+</p>
+
+<p align="center"><sub>使用内置 Demo Provider 运行的真实浏览器端到端流程：任务创建 → PRD 审批 → 架构选择 → 代码实现 → Review → Test → Delivery。</sub></p>
+
+### 核心工程问题与实现
+
+| 工程问题 | 实现机制 | 可验证证据 |
+| --- | --- | --- |
+| 多 Agent 容易失控、上下文漂移 | 确定性状态机编排 7 个 LLM 角色，以 Pydantic Artifact 传递结构化信息 | Workflow 状态、Artifact、ToolCall 与事件均持久化 |
+| 长任务中断后难以继续 | 持久化 Execution Job、阶段 Checkpoint、幂等恢复与有限返工 | 服务重启恢复测试、失败上限和恢复事件 |
+| Coding Agent 可能越权修改 | ToolRegistry 权限交集、Workspace 路径约束、文件哈希、原子写入和 Git 质量门禁 | 工具审计、安全负例及受控提交链路 |
+| 大仓库 Context 过长 | 增量代码索引、BM25 + 可插拔 Dense Embedding + RRF、相邻 Chunk 合并与 Token Budget | 独立 Retrieval Eval 与检索 Trace |
+| 测试结果只有原始日志 | 九种白名单 Runner；Robot Framework `output.xml` 解析为用例级结构化结果 | 205 项后端测试、82.17% 分支覆盖率门禁 |
+| 外部 Agent 接入边界不统一 | `safe-code-change` Skill + 只读 stdio MCP，经 ToolRegistry 暴露项目 Context、代码检索和 Memory | 真实 MCP Client 测试与端到端使用验证 |
+
+[快速开始](#本地启动) · [工作流](#工作流) · [Hybrid Retrieval](#hybrid-code-retrieval) · [测试与质量门禁](#验证) · [真实实现边界](docs/devteamagent_v2/resume_facts.md)
 
 ```text
 User → Workflow State Machine → Agent Harness
