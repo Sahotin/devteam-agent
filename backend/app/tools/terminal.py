@@ -12,8 +12,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.app.domain.artifacts import StructuredTestSummary
 from backend.app.domain.enums import CommandStatus, TestRunner
 from backend.app.delivery.runtime import ProjectRuntimeManager
+from backend.app.testing.robot import (
+    ROBOT_RESULT_DIRECTORY,
+    RobotFrameworkRunner,
+    RobotResultError,
+)
 from backend.app.tools.base import BaseTool, ToolContext
 from backend.app.tools.path_policy import WorkspacePathPolicy
 
@@ -135,6 +141,7 @@ class TerminalRunOutput(BaseModel):
     timed_out: bool = False
     output_truncated: bool = False
     executor: str = "local-restricted"
+    structured_summary: StructuredTestSummary | None = None
 
 
 class TerminalTool(BaseTool):
@@ -197,6 +204,7 @@ class TerminalTool(BaseTool):
             in {
                 TestRunner.PYTHON_COMPILE,
                 TestRunner.PYTEST,
+                TestRunner.ROBOT,
                 TestRunner.UNITTEST,
             }
             and ProjectRuntimeManager.python_dependencies_required(root)
@@ -212,12 +220,23 @@ class TerminalTool(BaseTool):
             )
         command = self._resolve_command_for_root(input_data.runner, root)
         if command is None:
+            if input_data.runner is TestRunner.ROBOT:
+                message = (
+                    "Robot Framework test suites were not found. Add .robot files under "
+                    "tests/, robot/ or the project root."
+                )
+            else:
+                message = (
+                    f"required executable for {input_data.runner.value} was not found"
+                )
             return TerminalRunOutput(
                 runner=input_data.runner,
                 status=CommandStatus.ENVIRONMENT_ERROR,
-                stderr=f"required executable for {input_data.runner.value} was not found",
+                stderr=message,
                 duration_ms=0,
             )
+        if input_data.runner is TestRunner.ROBOT:
+            RobotFrameworkRunner.prepare(root)
         environment = self._safe_environment()
         if input_data.runner in {TestRunner.NPM_TEST, TestRunner.NPM_BUILD}:
             executable_directory = str(Path(command[0]).resolve().parent)
@@ -288,6 +307,7 @@ class TerminalTool(BaseTool):
         duration_ms = int((time.monotonic() - started) * 1000)
         stdout = stdout_buffer.text()
         stderr = stderr_buffer.text()
+        structured_summary: StructuredTestSummary | None = None
         if timed_out:
             status = CommandStatus.TIMED_OUT
         elif exit_code == 0:
@@ -300,6 +320,19 @@ class TerminalTool(BaseTool):
             and "failed to write coverage reports" in f"{stdout}\n{stderr}".casefold()
         ):
             status = CommandStatus.ENVIRONMENT_ERROR
+        if runner is TestRunner.ROBOT and not timed_out:
+            try:
+                structured_summary = RobotFrameworkRunner.parse(root)
+            except RobotResultError as error:
+                status = CommandStatus.ENVIRONMENT_ERROR
+                stderr = f"{stderr}\n{error}".strip()
+            else:
+                if structured_summary.failed:
+                    status = CommandStatus.FAILED
+                elif exit_code == 0:
+                    status = CommandStatus.SUCCEEDED
+                else:
+                    status = CommandStatus.ENVIRONMENT_ERROR
         return TerminalRunOutput(
             runner=runner,
             status=status,
@@ -310,6 +343,7 @@ class TerminalTool(BaseTool):
             timed_out=timed_out,
             output_truncated=stdout_buffer.truncated or stderr_buffer.truncated,
             executor=executor_name,
+            structured_summary=structured_summary,
         )
 
     def _resolve_command_for_root(
@@ -317,6 +351,9 @@ class TerminalTool(BaseTool):
         runner: TestRunner,
         root: Path,
     ) -> list[str] | None:
+        if runner is TestRunner.ROBOT:
+            python = ProjectRuntimeManager._project_python(root) or sys.executable
+            return RobotFrameworkRunner.command(python, root)
         # 保留 _resolve_command(runner) 的旧扩展接口，避免已有自定义执行器失效。
         command = self._resolve_command(runner)
         if (
@@ -325,6 +362,7 @@ class TerminalTool(BaseTool):
             in {
                 TestRunner.PYTHON_COMPILE,
                 TestRunner.PYTEST,
+                TestRunner.ROBOT,
                 TestRunner.UNITTEST,
             }
         ):
@@ -344,6 +382,8 @@ class TerminalTool(BaseTool):
             return [python, "-m", "compileall", "-q", "."]
         if runner is TestRunner.PYTEST:
             return [python, "-m", "pytest", "-q"]
+        if runner is TestRunner.ROBOT:
+            return [python, "-m", "robot"]
         if runner is TestRunner.UNITTEST:
             return [python, "-m", "unittest", "discover"]
         if runner is TestRunner.NPM_TEST:
@@ -433,6 +473,23 @@ class TerminalTool(BaseTool):
             "stdout_redacted": True,
             "stderr_redacted": True,
             "executor": output.executor,
+            # 审计记录只保留计数和产物路径，不复制测试失败消息，避免把
+            # 被测项目输出中的凭据或业务数据持久化到 ToolCall 审计表。
+            "structured_summary": (
+                {
+                    "framework": output.structured_summary.framework,
+                    "total": output.structured_summary.total,
+                    "passed": output.structured_summary.passed,
+                    "failed": output.structured_summary.failed,
+                    "skipped": output.structured_summary.skipped,
+                    "duration_ms": output.structured_summary.duration_ms,
+                    "output_path": output.structured_summary.output_path,
+                    "log_path": output.structured_summary.log_path,
+                    "report_path": output.structured_summary.report_path,
+                }
+                if output.structured_summary
+                else None
+            ),
         }
 
 
@@ -465,7 +522,23 @@ class DockerTerminalTool(TerminalTool):
                 duration_ms=0,
                 executor="docker",
             )
-        image, runner_command = self._container_spec(input_data.runner)
+        if (
+            input_data.runner is TestRunner.ROBOT
+            and RobotFrameworkRunner.discover_target(root) is None
+        ):
+            return TerminalRunOutput(
+                runner=input_data.runner,
+                status=CommandStatus.ENVIRONMENT_ERROR,
+                stderr=(
+                    "Robot Framework test suites were not found. Add .robot files under "
+                    "tests/, robot/ or the project root."
+                ),
+                duration_ms=0,
+                executor="docker",
+            )
+        if input_data.runner is TestRunner.ROBOT:
+            RobotFrameworkRunner.prepare(root)
+        image, runner_command = self._container_spec(input_data.runner, root)
         mount = f"{root}:/workspace:rw"
         command = [
             docker,
@@ -515,13 +588,15 @@ class DockerTerminalTool(TerminalTool):
         return shutil.which("docker")
 
     @staticmethod
-    def _container_spec(runner: TestRunner) -> tuple[str, list[str]]:
+    def _container_spec(
+        runner: TestRunner, root: Path | None = None
+    ) -> tuple[str, list[str]]:
         if runner is TestRunner.NODE_CHECK:
             return "node:22-alpine", ["node", "-e", NODE_CHECK_SCRIPT]
         if runner is TestRunner.STATIC_PAGE_CHECK:
             return "python:3.12-alpine", ["python", "-c", STATIC_PAGE_CHECK_SCRIPT]
         if runner is TestRunner.PYTHON_COMPILE:
-            return "devteam-agent/python-runner:0.5.0", [
+            return "devteam-agent/python-runner:0.6.0", [
                 "python",
                 "-m",
                 "compileall",
@@ -529,14 +604,36 @@ class DockerTerminalTool(TerminalTool):
                 ".",
             ]
         if runner is TestRunner.PYTEST:
-            return "devteam-agent/python-runner:0.5.0", [
+            return "devteam-agent/python-runner:0.6.0", [
                 "python",
                 "-m",
                 "pytest",
                 "-q",
             ]
+        if runner is TestRunner.ROBOT:
+            if root is None:
+                raise ValueError("Robot Framework runner requires a workspace root")
+            target = RobotFrameworkRunner.discover_target(root)
+            if target is None:
+                raise ValueError("Robot Framework test suites were not found")
+            return "devteam-agent/python-runner:0.6.0", [
+                "python",
+                "-m",
+                "robot",
+                "--outputdir",
+                ROBOT_RESULT_DIRECTORY.as_posix(),
+                "--output",
+                "output.xml",
+                "--log",
+                "log.html",
+                "--report",
+                "report.html",
+                "--console",
+                "quiet",
+                target,
+            ]
         if runner is TestRunner.UNITTEST:
-            return "devteam-agent/python-runner:0.5.0", [
+            return "devteam-agent/python-runner:0.6.0", [
                 "python",
                 "-m",
                 "unittest",

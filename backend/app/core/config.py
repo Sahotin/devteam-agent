@@ -45,6 +45,21 @@ class Settings:
         "http://127.0.0.1:5173",
     )
     mcp_allowed_workspace_roots: tuple[str, ...] = ()
+    retrieval_mode: str = "hybrid"
+    retrieval_bm25_top_k: int = 20
+    retrieval_dense_top_k: int = 20
+    retrieval_final_top_k: int = 8
+    retrieval_rrf_k: int = 60
+    retrieval_max_merged_chars: int = 16_000
+    retrieval_timeout_seconds: float = 30
+    retrieval_default_languages: tuple[str, ...] = ()
+    retrieval_default_symbol_types: tuple[str, ...] = ()
+    embedding_provider: str = "hash"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimension: int = 256
+    embedding_batch_size: int = 32
+    embedding_api_key: str | None = field(default=None, repr=False)
+    embedding_base_url: str | None = None
     llm_provider: str = "demo"
     llm_model: str = "gpt-5.6-sol"
     model_routing_strategy: str = "DYNAMIC"
@@ -107,6 +122,32 @@ class Settings:
             )
         if self.worker_concurrency < 1:
             raise ValueError("DEVTEAM_WORKER_CONCURRENCY must be at least one")
+        if self.retrieval_mode not in {"bm25", "vector", "hybrid"}:
+            raise ValueError("DEVTEAM_RETRIEVAL_MODE must be bm25, vector or hybrid")
+        if self.embedding_provider not in {"hash", "openai"}:
+            raise ValueError("DEVTEAM_EMBEDDING_PROVIDER must be hash or openai")
+        if self.embedding_provider == "openai" and not self.embedding_api_key:
+            raise ValueError(
+                "DEVTEAM_EMBEDDING_API_KEY is required for the openai embedding provider"
+            )
+        if self.embedding_provider == "openai" and not self.embedding_model.strip():
+            raise ValueError("DEVTEAM_EMBEDDING_MODEL is required")
+        if self.embedding_provider == "hash" and self.embedding_dimension < 32:
+            raise ValueError("hash embedding dimension must be at least 32")
+        retrieval_limits = {
+            "DEVTEAM_RETRIEVAL_BM25_TOP_K": self.retrieval_bm25_top_k,
+            "DEVTEAM_RETRIEVAL_DENSE_TOP_K": self.retrieval_dense_top_k,
+            "DEVTEAM_RETRIEVAL_FINAL_TOP_K": self.retrieval_final_top_k,
+            "DEVTEAM_RETRIEVAL_RRF_K": self.retrieval_rrf_k,
+            "DEVTEAM_RETRIEVAL_MAX_MERGED_CHARS": self.retrieval_max_merged_chars,
+            "DEVTEAM_EMBEDDING_DIMENSION": self.embedding_dimension,
+            "DEVTEAM_EMBEDDING_BATCH_SIZE": self.embedding_batch_size,
+        }
+        for name, value in retrieval_limits.items():
+            if value < 1:
+                raise ValueError(f"{name} must be positive")
+        if self.retrieval_timeout_seconds <= 0:
+            raise ValueError("DEVTEAM_RETRIEVAL_TIMEOUT_SECONDS must be positive")
         if self.openai_timeout_seconds <= 0:
             raise ValueError("DEVTEAM_OPENAI_TIMEOUT_SECONDS must be positive")
         if self.openai_max_retries < 0:
@@ -189,6 +230,54 @@ class Settings:
                 ).split(",")
                 if root.strip()
             ),
+            retrieval_mode=(
+                getenv("DEVTEAM_RETRIEVAL_MODE", "hybrid") or "hybrid"
+            ).lower(),
+            retrieval_bm25_top_k=int(
+                getenv("DEVTEAM_RETRIEVAL_BM25_TOP_K", "20") or "20"
+            ),
+            retrieval_dense_top_k=int(
+                getenv("DEVTEAM_RETRIEVAL_DENSE_TOP_K", "20") or "20"
+            ),
+            retrieval_final_top_k=int(
+                getenv("DEVTEAM_RETRIEVAL_FINAL_TOP_K", "8") or "8"
+            ),
+            retrieval_rrf_k=int(getenv("DEVTEAM_RETRIEVAL_RRF_K", "60") or "60"),
+            retrieval_max_merged_chars=int(
+                getenv("DEVTEAM_RETRIEVAL_MAX_MERGED_CHARS", "16000") or "16000"
+            ),
+            retrieval_timeout_seconds=float(
+                getenv("DEVTEAM_RETRIEVAL_TIMEOUT_SECONDS", "30") or "30"
+            ),
+            retrieval_default_languages=tuple(
+                value.strip()
+                for value in (
+                    getenv("DEVTEAM_RETRIEVAL_DEFAULT_LANGUAGES", "") or ""
+                ).split(",")
+                if value.strip()
+            ),
+            retrieval_default_symbol_types=tuple(
+                value.strip()
+                for value in (
+                    getenv("DEVTEAM_RETRIEVAL_DEFAULT_SYMBOL_TYPES", "") or ""
+                ).split(",")
+                if value.strip()
+            ),
+            embedding_provider=(
+                getenv("DEVTEAM_EMBEDDING_PROVIDER", "hash") or "hash"
+            ).lower(),
+            embedding_model=(
+                getenv("DEVTEAM_EMBEDDING_MODEL", "text-embedding-3-small")
+                or "text-embedding-3-small"
+            ),
+            embedding_dimension=int(
+                getenv("DEVTEAM_EMBEDDING_DIMENSION", "256") or "256"
+            ),
+            embedding_batch_size=int(
+                getenv("DEVTEAM_EMBEDDING_BATCH_SIZE", "32") or "32"
+            ),
+            embedding_api_key=getenv("DEVTEAM_EMBEDDING_API_KEY") or None,
+            embedding_base_url=getenv("DEVTEAM_EMBEDDING_BASE_URL") or None,
             llm_provider=getenv("DEVTEAM_LLM_PROVIDER", "demo") or "demo",
             llm_model=getenv("DEVTEAM_LLM_MODEL", "gpt-5.6-sol") or "gpt-5.6-sol",
             model_routing_strategy=(

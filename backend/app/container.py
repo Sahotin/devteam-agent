@@ -41,7 +41,11 @@ from backend.app.delivery.runtime import ProjectRuntimeManager
 from backend.app.memory.service import MemoryService
 from backend.app.orchestrator.service import WorkflowService
 from backend.app.rag.chunker import LanguageAwareChunker
-from backend.app.rag.embedding import HashEmbeddingProvider
+from backend.app.rag.embedding import (
+    HashEmbeddingProvider,
+    OpenAICompatibleEmbeddingProvider,
+)
+from backend.app.rag.retriever import RetrievalConfig
 from backend.app.rag.scanner import RepositoryScanner
 from backend.app.rag.service import CodeIndexService
 from backend.app.tools.code_search import CodeSearchTool
@@ -101,14 +105,38 @@ class ApplicationContainer:
             else cls._build_model_router(settings)
         )
         model_audit_sink = cls._model_audit_sink(repository)
-        embedding_provider = HashEmbeddingProvider()
+        embedding_provider = (
+            HashEmbeddingProvider(settings.embedding_dimension)
+            if settings.embedding_provider == "hash"
+            else OpenAICompatibleEmbeddingProvider(
+                api_key=settings.embedding_api_key or "",
+                base_url=settings.embedding_base_url,
+                model=settings.embedding_model,
+                dimension=settings.embedding_dimension,
+                timeout_seconds=settings.retrieval_timeout_seconds,
+                batch_size=settings.embedding_batch_size,
+            )
+        )
         index_service = CodeIndexService(
             repository=repository,
             scanner=RepositoryScanner(),
             chunker=LanguageAwareChunker(),
             embedding_provider=embedding_provider,
+            retrieval_config=RetrievalConfig(
+                mode=settings.retrieval_mode,
+                bm25_top_k=settings.retrieval_bm25_top_k,
+                dense_top_k=settings.retrieval_dense_top_k,
+                final_top_k=settings.retrieval_final_top_k,
+                rrf_k=settings.retrieval_rrf_k,
+                max_merged_chars=settings.retrieval_max_merged_chars,
+                timeout_seconds=settings.retrieval_timeout_seconds,
+                default_languages=settings.retrieval_default_languages,
+                default_symbol_types=settings.retrieval_default_symbol_types,
+            ),
         )
-        memory_service = MemoryService(repository, embedding_provider)
+        # Memory keeps its original deterministic embedding space.  Code retrieval
+        # can move to a semantic provider without invalidating persisted memories.
+        memory_service = MemoryService(repository, HashEmbeddingProvider())
         runtime_manager = ProjectRuntimeManager(repository)
         skill_registry = SkillRegistry(Path(settings.skill_root))
         skill_registry.load()

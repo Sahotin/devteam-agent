@@ -24,6 +24,12 @@ LANGUAGE_BY_SUFFIX = {
 INDEX_BLOCKED_PARTS = frozenset(
     {
         ".devteam",
+        ".git",
+        ".venv",
+        "node_modules",
+        "release",
+        "reports",
+        "tmp",
         "data",
         "dist",
         "build",

@@ -91,6 +91,10 @@ def test_incremental_index_and_hybrid_search(client: TestClient, tmp_path: Path)
     assert second["indexed_files"] == 0
     assert second["unchanged_files"] == 3
 
+    forced = client.post(f"/api/v1/projects/{project_id}/index?force=true").json()
+    assert forced["indexed_files"] == 3
+    assert forced["embedded_chunks"] == forced["created_chunks"]
+
     search = client.post(
         f"/api/v1/projects/{project_id}/search",
         json={"query": "validate authentication token", "top_k": 3},
@@ -155,6 +159,24 @@ def test_developer_receives_hybrid_rag_context(client: TestClient, tmp_path: Pat
     assert rag_call["status"] == "SUCCEEDED"
     assert rag_call["output"]["content_redacted"] is True
     assert rag_call["output"]["hit_count"] >= 1
+    assert rag_call["output"]["retrieval_mode"] == "hybrid"
+    assert rag_call["output"]["index_version"] != "empty"
+
+    events = client.get(f"/api/v1/tasks/{task_id}/events").json()
+    retrieval_event = next(
+        event for event in events if event["event_type"] == "RETRIEVAL_COMPLETED"
+    )
+    assert retrieval_event["payload"]["selected_chunks"] >= 1
+    assert retrieval_event["payload"]["selected_sources"][0]["path"]
+    context_event = next(
+        event
+        for event in events
+        if event["event_type"] == "CONTEXT_BUILT"
+        and "payload:source_context" in event["payload"]["source_ids"]
+    )
+    assert context_event["payload"]["context_tokens"] <= (
+        context_event["payload"]["max_context_tokens"]
+    )
 
 
 def test_retrieval_evaluation_reports_recall_and_mrr(

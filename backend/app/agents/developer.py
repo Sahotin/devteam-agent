@@ -471,8 +471,11 @@ class DeveloperAgent:
                     "symbol_name": hit.symbol_name,
                     "start_line": hit.start_line,
                     "end_line": hit.end_line,
-                    "retrieval": "hybrid-rag",
+                    "retrieval": f"{rag_output.retrieval_mode}-rag",
                     "score": hit.score,
+                    "bm25_rank": hit.bm25_rank,
+                    "dense_rank": hit.dense_rank,
+                    "matched_by": hit.matched_by,
                 }
             )
             context_chars += len(visible_content)

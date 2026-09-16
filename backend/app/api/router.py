@@ -703,8 +703,10 @@ async def git_commit(
     response_model=IndexReport,
     tags=["rag"],
 )
-def index_project(project_id: str, container: Container) -> IndexReport:
-    return container.index_service.index_project(project_id)
+def index_project(
+    project_id: str, container: Container, force: bool = False
+) -> IndexReport:
+    return container.index_service.index_project(project_id, force=force)
 
 
 @router.get(

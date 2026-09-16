@@ -41,7 +41,7 @@ from backend.app.domain.models import (
     ToolCallRecord,
 )
 from backend.app.domain.state_machine import ensure_transition
-from backend.app.domain.rag import CodeChunk, IndexedFileRecord, IndexStats
+from backend.app.domain.rag import CodeChunk, FileIndexUpdate, IndexedFileRecord, IndexStats
 from backend.app.domain.task_title import build_task_title
 from backend.app.domain.task_policy import TaskComplexityPolicy, TaskPolicyDecision
 from backend.app.infrastructure.database.tables import (
@@ -888,45 +888,82 @@ class SqlAlchemyRepository:
         language: str,
         chunks: list[CodeChunk],
     ) -> None:
+        self.apply_code_index_update(
+            project_id=project_id,
+            deleted_paths=[],
+            updates=[
+                FileIndexUpdate(
+                    file_path=file_path,
+                    manifest_hash=content_hash,
+                    language=language,
+                    chunks=chunks,
+                )
+            ],
+        )
+
+    def apply_code_index_update(
+        self,
+        *,
+        project_id: str,
+        deleted_paths: list[str],
+        updates: list[FileIndexUpdate],
+    ) -> None:
+        """Commit sparse metadata and vectors as one index generation."""
         with self._session() as session:
             if session.get(ProjectRow, project_id) is None:
                 raise EntityNotFoundError(f"project {project_id} was not found")
-            session.execute(
-                delete(CodeChunkRow).where(
-                    CodeChunkRow.project_id == project_id,
-                    CodeChunkRow.file_path == file_path,
-                )
-            )
-            indexed_file = session.get(IndexedFileRow, (project_id, file_path))
-            if indexed_file is None:
-                indexed_file = IndexedFileRow(
-                    project_id=project_id,
-                    file_path=file_path,
-                    content_hash=content_hash,
-                    language=language,
-                )
-                session.add(indexed_file)
-            else:
-                indexed_file.content_hash = content_hash
-                indexed_file.language = language
-                indexed_file.indexed_at = utc_now()
-            for chunk in chunks:
-                session.add(
-                    CodeChunkRow(
-                        id=chunk.id,
-                        project_id=chunk.project_id,
-                        file_path=chunk.file_path,
-                        content_hash=chunk.content_hash,
-                        chunk_index=chunk.chunk_index,
-                        language=chunk.language,
-                        symbol_name=chunk.symbol_name,
-                        symbol_type=chunk.symbol_type,
-                        start_line=chunk.start_line,
-                        end_line=chunk.end_line,
-                        content=chunk.content,
-                        embedding=chunk.embedding,
+            if deleted_paths:
+                session.execute(
+                    delete(CodeChunkRow).where(
+                        CodeChunkRow.project_id == project_id,
+                        CodeChunkRow.file_path.in_(deleted_paths),
                     )
                 )
+                session.execute(
+                    delete(IndexedFileRow).where(
+                        IndexedFileRow.project_id == project_id,
+                        IndexedFileRow.file_path.in_(deleted_paths),
+                    )
+                )
+            for update_item in updates:
+                session.execute(
+                    delete(CodeChunkRow).where(
+                        CodeChunkRow.project_id == project_id,
+                        CodeChunkRow.file_path == update_item.file_path,
+                    )
+                )
+                indexed_file = session.get(
+                    IndexedFileRow, (project_id, update_item.file_path)
+                )
+                if indexed_file is None:
+                    indexed_file = IndexedFileRow(
+                        project_id=project_id,
+                        file_path=update_item.file_path,
+                        content_hash=update_item.manifest_hash,
+                        language=update_item.language,
+                    )
+                    session.add(indexed_file)
+                else:
+                    indexed_file.content_hash = update_item.manifest_hash
+                    indexed_file.language = update_item.language
+                    indexed_file.indexed_at = utc_now()
+                for chunk in update_item.chunks:
+                    session.add(
+                        CodeChunkRow(
+                            id=chunk.id,
+                            project_id=chunk.project_id,
+                            file_path=chunk.file_path,
+                            content_hash=chunk.content_hash,
+                            chunk_index=chunk.chunk_index,
+                            language=chunk.language,
+                            symbol_name=chunk.symbol_name,
+                            symbol_type=chunk.symbol_type,
+                            start_line=chunk.start_line,
+                            end_line=chunk.end_line,
+                            content=chunk.content,
+                            embedding=chunk.embedding,
+                        )
+                    )
 
     def delete_file_index(self, project_id: str, file_path: str) -> None:
         with self._session() as session:

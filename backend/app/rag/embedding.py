@@ -6,9 +6,16 @@ import re
 from collections import Counter
 from typing import Protocol
 
+from openai import OpenAI
+
 
 class EmbeddingProvider(Protocol):
     dimension: int
+    provider_id: str
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
+
+    def embed_query(self, query: str) -> list[float]: ...
 
     def embed(self, text: str) -> list[float]: ...
 
@@ -36,6 +43,7 @@ class HashEmbeddingProvider:
         if dimension < 32:
             raise ValueError("embedding dimension must be at least 32")
         self.dimension = dimension
+        self.provider_id = f"hash-blake2b-v1:{dimension}"
 
     def embed(self, text: str) -> list[float]:
         counts = Counter(tokenize_code(text))
@@ -50,3 +58,68 @@ class HashEmbeddingProvider:
             return [value / norm for value in vector]
         return vector
 
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(text) for text in texts]
+
+    def embed_query(self, query: str) -> list[float]:
+        return self.embed(query)
+
+
+class OpenAICompatibleEmbeddingProvider:
+    """Semantic embedding provider for OpenAI-compatible embedding endpoints."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        dimension: int = 1024,
+        timeout_seconds: float = 30,
+        max_retries: int = 2,
+        batch_size: int = 32,
+    ) -> None:
+        if not api_key:
+            raise ValueError("embedding API key is required")
+        if not model:
+            raise ValueError("embedding model is required")
+        if dimension < 1 or batch_size < 1:
+            raise ValueError("embedding dimension and batch size must be positive")
+        self.dimension = dimension
+        self.batch_size = batch_size
+        self.provider_id = f"openai-compatible:{base_url or 'default'}:{model}:{dimension}"
+        self._model = model
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout_seconds,
+            max_retries=max_retries,
+        )
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            response = self._client.embeddings.create(
+                model=self._model,
+                input=texts[start : start + self.batch_size],
+                dimensions=self.dimension,
+            )
+            ordered = sorted(response.data, key=lambda item: item.index)
+            vectors.extend(self._normalize(list(item.embedding)) for item in ordered)
+        if len(vectors) != len(texts):
+            raise RuntimeError("embedding endpoint returned an unexpected vector count")
+        return vectors
+
+    def embed_query(self, query: str) -> list[float]:
+        vectors = self.embed_documents([query])
+        return vectors[0]
+
+    def embed(self, text: str) -> list[float]:
+        return self.embed_query(text)
+
+    @staticmethod
+    def _normalize(vector: list[float]) -> list[float]:
+        norm = math.sqrt(sum(value * value for value in vector))
+        if not norm:
+            return vector
+        return [value / norm for value in vector]

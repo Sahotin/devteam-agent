@@ -19,6 +19,8 @@ class ChunkDraft:
     content: str
     symbol_name: str | None = None
     symbol_type: str | None = None
+    class_name: str | None = None
+    function_name: str | None = None
 
 
 class LanguageAwareChunker:
@@ -55,14 +57,26 @@ class LanguageAwareChunker:
                         )
                     )
             symbol_type = "class" if isinstance(node, ast.ClassDef) else "function"
+            node_drafts = self._split_range(
+                lines,
+                node_start,
+                node.end_lineno or node.lineno,
+                node.name,
+                symbol_type,
+            )
             drafts.extend(
-                self._split_range(
-                    lines,
-                    node_start,
-                    node.end_lineno or node.lineno,
-                    node.name,
-                    symbol_type,
-                )
+                [
+                    ChunkDraft(
+                        start_line=draft.start_line,
+                        end_line=draft.end_line,
+                        content=draft.content,
+                        symbol_name=draft.symbol_name,
+                        symbol_type=draft.symbol_type,
+                        class_name=node.name if symbol_type == "class" else None,
+                        function_name=node.name if symbol_type == "function" else None,
+                    )
+                    for draft in node_drafts
+                ]
             )
             cursor = (node.end_lineno or node.lineno) + 1
         if cursor <= len(lines):

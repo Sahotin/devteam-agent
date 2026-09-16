@@ -353,6 +353,35 @@ class TestPlan(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class TestCaseFailure(BaseModel):
+    name: str
+    suite: str | None = None
+    source: str | None = None
+    line: int | None = Field(default=None, ge=1)
+    message: str
+
+
+class StructuredTestSummary(BaseModel):
+    framework: str
+    total: int = Field(ge=0)
+    passed: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+    duration_ms: int = Field(ge=0)
+    failures: list[TestCaseFailure] = Field(default_factory=list, max_length=50)
+    output_path: str | None = None
+    log_path: str | None = None
+    report_path: str | None = None
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> "StructuredTestSummary":
+        if self.total != self.passed + self.failed + self.skipped:
+            raise ValueError("structured test counts do not add up to total")
+        if self.failed == 0 and self.failures:
+            raise ValueError("test failures require a non-zero failed count")
+        return self
+
+
 class TestCommandResult(BaseModel):
     command_id: str = Field(pattern=r"^TST-\d{3}$")
     runner: TestRunner
@@ -363,6 +392,7 @@ class TestCommandResult(BaseModel):
     stdout_excerpt: str = ""
     stderr_excerpt: str = ""
     output_truncated: bool = False
+    structured_summary: StructuredTestSummary | None = None
 
 
 class TestReportArtifact(BaseModel):

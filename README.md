@@ -42,11 +42,12 @@ Eval  ← Artifact / Trace / Usage
 - Reviewer 自动校正验收标准与需求编号，避免结构化产物错误造成重复失败
 - Developer 在写入前重新读取文件，支持幂等修改、哈希刷新和内容失配自动重新规划
 - 静态网页通过本地 HTTP 可访问性与资源完整性检查后才能完成交付
+- 自动发现仓库中的 Robot Framework 套件，通过白名单 Runner 执行关键字驱动验收测试，并把 `output.xml` 解析为用例级通过、失败、跳过与失败定位信息
 - 任务状态机、Checkpoint、暂停、恢复、取消和失败限制
 - File、Code Search、Terminal、Git、RAG、Memory 工具及权限审计
 - 安全路径校验、文件哈希并发保护、测试命令白名单和输出脱敏
 - Git 提交前质量门禁和文件哈希一致性校验
-- 仓库增量索引、语言感知切片、Hash Embedding、BM25 与 RRF 混合检索
+- 仓库增量索引、语言感知切片、可插拔 Embedding、BM25 与 RRF 混合检索；默认 Hash Embedding 仅作为离线确定性基线
 - Short-term、Project、Long-term 三层 Memory
 - Memory 脱敏、去重、冲突候选、人工验证、版本失效和任务完成后沉淀
 - Agent 产物记录实际引用的代码上下文及记忆 ID，支持全链路审计
@@ -123,6 +124,53 @@ DeepSeek 与 OpenAI Provider 会从官方响应的 `usage` 字段采集输入、
 - 带相同 `conflict_key` 的矛盾事实不会直接覆盖旧事实，而是降级为 `CANDIDATE`，等待人工验证。
 - 记忆检索使用 BM25、Hash Embedding 与 Reciprocal Rank Fusion，并结合可信度和状态加权。
 
+## Hybrid Code Retrieval
+
+代码中的文件名、类名、函数名和异常字符串需要精确词法匹配，因此 BM25 仍然保留；自然语言问题与源码命名不一致时，则可以由语义 Embedding 补充召回。代码检索链路为：
+
+```text
+Query
+ ├─ BM25 sparse candidates
+ └─ Embedding dense candidates
+             ↓
+      Reciprocal Rank Fusion
+             ↓
+   Metadata Filter / Dedup / Merge
+             ↓
+     Agent source_context
+             ↓
+   ContextBuilder / Token Budget
+             ↓
+            LLM
+```
+
+融合使用 `RRF(d) = Σ 1 / (k + rank_i(d))`，默认 `k=60`。RRF 只依赖每一路的排名，不直接相加量纲不同的 BM25 分数和余弦相似度。搜索支持 `bm25`、`vector`、`hybrid` 三种模式，并返回 `bm25_rank`、`dense_rank`、`matched_by`、索引版本、耗时和降级原因。基础过滤支持文件路径、路径前缀、语言和符号类型；重叠或相邻 Chunk 会在最大字符限制内合并，最终仍由 ContextBuilder 执行全局 Token 预算。
+
+索引 Manifest 由文件 SHA-256、Embedding Provider 标识和 Chunker 版本共同决定。未变化文件不会重新切片或 Embedding；新增和修改文件批量生成向量，删除文件清理对应 Chunk。一次扫描中的删除、稀疏检索元数据和向量记录在同一数据库事务提交，失败时保留上一代索引。向量随 `code_chunks` 持久化到 `DEVTEAM_DATABASE_URL` 指向的 SQLite/PostgreSQL，不依赖外部向量数据库；文件重命名按删除加新增处理。
+
+默认配置使用 `hash` Provider，以保证离线测试和 Demo 可重复。它是词法哈希基线，不应描述成语义 Embedding。接入兼容 OpenAI `/embeddings` 的真实语义模型时配置：
+
+```env
+DEVTEAM_EMBEDDING_PROVIDER=openai
+DEVTEAM_EMBEDDING_MODEL=text-embedding-3-small
+DEVTEAM_EMBEDDING_DIMENSION=256
+DEVTEAM_EMBEDDING_BATCH_SIZE=32
+DEVTEAM_EMBEDDING_API_KEY=your-embedding-api-key
+DEVTEAM_EMBEDDING_BASE_URL=
+```
+
+检索参数统一使用 `DEVTEAM_RETRIEVAL_MODE`、`DEVTEAM_RETRIEVAL_BM25_TOP_K`、`DEVTEAM_RETRIEVAL_DENSE_TOP_K`、`DEVTEAM_RETRIEVAL_FINAL_TOP_K`、`DEVTEAM_RETRIEVAL_RRF_K`、`DEVTEAM_RETRIEVAL_MAX_MERGED_CHARS` 和 `DEVTEAM_RETRIEVAL_TIMEOUT_SECONDS`。修改 Provider、模型维度或 Chunker 版本后，下次调用项目索引接口会根据 Manifest 自动重建受影响的向量；若要强制全量重建，调用 `POST /api/v1/projects/{project_id}/index?force=true`。
+
+Dense 建索引失败时，本轮写入零向量并明确记录 `dense_index:*` 降级原因，BM25 仍可搜索；该 Manifest 不会被视为最新，下一次索引会重试 Embedding。Hybrid 查询阶段某一路失败时降级到另一路并保留 `fallback` 与 `RETRIEVAL_COMPLETED` Trace；显式 `vector` 模式失败则返回错误，不会伪装成成功。
+
+独立检索评测使用人工核验的 JSON 用例，并真实比较 Recall@K、MRR 和 Precision@K：
+
+```text
+python scripts/run_retrieval_evaluation.py . --k 5
+```
+
+用例位于 `docs/rag/retrieval_eval_cases.json`。默认 Hash Provider 的结果只是回归基线；只有在同一人工标注集合上配置并运行真实语义 Provider 后，才能比较 Hybrid 是否优于 BM25，不能从自动生成样本推导性能结论。
+
 ## 后台执行与事件流
 
 客户端可以通过 `POST /api/v1/tasks/{task_id}/executions` 提交 `START`、`DECIDE_PRD`、`DECIDE_ARCHITECTURE`、`RUN_REVIEW` 或 `RUN_TESTS` 动作，并立即获得持久化 Execution ID。Worker 在后台执行工作流，客户端通过 Execution 查询接口或 SSE 事件流跟踪进度。
@@ -180,7 +228,13 @@ Compose 会启动 PostgreSQL，等待数据库健康后执行 `alembic upgrade h
 
 默认使用 SQLite，数据库位于 `data/devteam_agent.db`。当前 Demo Model 用于稳定演示结构化工作流；它只会在目标项目的 `.devteam/tasks/` 下生成可追踪的实现计划，不会虚构业务代码或测试已经完成。
 
-Terminal Tool 默认使用本地受限执行器，仅接受 `NODE_CHECK`、`STATIC_PAGE_CHECK`、`PYTHON_COMPILE`、`PYTEST`、`UNITTEST`、`NPM_TEST`、`NPM_BUILD` 和 `MAVEN_TEST` 八种预定义 Runner。也可以通过 `DEVTEAM_TERMINAL_EXECUTOR=docker` 启用关闭网络、限制资源和移除 Linux capabilities 的 Docker 执行器。
+Terminal Tool 默认使用本地受限执行器，仅接受 `NODE_CHECK`、`STATIC_PAGE_CHECK`、`PYTHON_COMPILE`、`PYTEST`、`ROBOT`、`UNITTEST`、`NPM_TEST`、`NPM_BUILD` 和 `MAVEN_TEST` 九种预定义 Runner。也可以通过 `DEVTEAM_TERMINAL_EXECUTOR=docker` 启用关闭网络、限制资源和移除 Linux capabilities 的 Docker 执行器。
+
+当目标仓库的 `tests/`、`robot/` 或根目录存在 `.robot` 文件时，Tester Agent 会确定性地把 `ROBOT` 加入测试计划，而不是仅依赖模型选择。执行产物保存在目标仓库的 `.devteam/test-results/robot/`，系统对 `output.xml` 做大小限制、危险声明拒绝和结构化解析；测试失败详情进入 Test Artifact 前会再次脱敏，ToolCall 审计只保存统计和产物路径。Docker 模式使用固定的 Python Runner：
+
+```text
+docker build -t devteam-agent/python-runner:0.6.0 sandbox/python
+```
 
 ## 验证
 
@@ -195,7 +249,7 @@ cd frontend && pnpm build
 python scripts/smoke_test.py
 ```
 
-后端覆盖率门禁当前为 80%；启用分支覆盖后的本次核验基线为 81.03%。前端覆盖率目前仅建立防回退基线，组件与浏览器交互测试仍是后续重点，不能把工具函数测试等同于完整 UI 验证。GitHub Actions 会在 Python 3.11/3.12 上运行后端检查，并执行前端类型检查、测试、生产构建、离线 Demo 工作流冒烟和 Docker 镜像构建。
+后端覆盖率门禁当前为 80%；启用分支覆盖后的本次核验基线为 82.17%（205 项测试通过）。前端覆盖率目前仅建立防回退基线，组件与浏览器交互测试仍是后续重点，不能把工具函数测试等同于完整 UI 验证。GitHub Actions 会在 Python 3.11/3.12 上运行后端检查，并执行前端类型检查、测试、生产构建、离线 Demo 工作流冒烟和 Docker 镜像构建。
 
 真实模型阶段可能受到网络和模型响应时间影响。冒烟脚本默认允许每个动作执行 180 秒，可通过 `DEVTEAM_SMOKE_EXECUTION_TIMEOUT` 调整；CI 始终使用不联网的 Demo Provider，将模型服务波动与代码回归分开。
 

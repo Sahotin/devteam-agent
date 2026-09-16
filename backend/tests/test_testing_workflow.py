@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 from backend.app.core.config import Settings
 from backend.app.domain.artifacts import (
+    StructuredTestSummary,
+    TestCaseFailure as CaseFailureSchema,
     TestCommandResult as CommandResultSchema,
     TestPlan as PlanSchema,
 )
@@ -160,6 +162,38 @@ def test_passing_test_report_completes_task(
         if event["event_type"] == "task.state_changed"
     ]
     assert transitions[-2:] == ["FINAL_VALIDATION", "COMPLETED"]
+
+
+def test_robot_suite_flows_through_tester_artifact(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "robot-workflow"
+    task_id = move_task_to_testing(client, workspace)
+    tests = workspace / "tests"
+    tests.mkdir()
+    (tests / "acceptance.robot").write_text(
+        "*** Test Cases ***\n"
+        "Generated Project Is Usable\n"
+        "    Should Be Equal    ready    ready\n",
+        encoding="utf-8",
+    )
+
+    tested = client.post(f"/api/v1/tasks/{task_id}/test")
+
+    assert tested.status_code == 200
+    assert tested.json()["state"] == "COMPLETED"
+    artifacts = client.get(f"/api/v1/tasks/{task_id}/artifacts").json()
+    report = [item for item in artifacts if item["type"] == "TEST_REPORT"][-1]
+    robot_result = next(
+        result
+        for result in report["content"]["results"]
+        if result["runner"] == "ROBOT"
+    )
+    assert robot_result["status"] == "SUCCEEDED"
+    assert robot_result["structured_summary"]["total"] == 1
+    assert robot_result["structured_summary"]["passed"] == 1
+    assert "Robot Framework 1/1 条通过" in report["content"]["summary"]
 
 
 def test_repeated_test_failure_stops_after_limit(tmp_path: Path) -> None:
@@ -329,3 +363,65 @@ def test_vite_typescript_plan_uses_one_build_check_before_static_injection(
     assert normalized.commands[0].acceptance_criteria_ids == ["AC-001", "AC-002"]
     assert any("TypeScript/TSX" in note for note in normalized.limitations)
     assert any("重复工程检查已合并" in note for note in normalized.limitations)
+
+
+def test_robot_suite_is_added_as_required_project_runner(tmp_path: Path) -> None:
+    workspace = tmp_path / "robot-project"
+    (workspace / "tests").mkdir(parents=True)
+    (workspace / "tests" / "acceptance.robot").write_text(
+        "*** Test Cases ***\nSmoke\n    Should Be Equal    ok    ok\n",
+        encoding="utf-8",
+    )
+    plan = PlanSchema.model_validate(
+        {
+            "summary": "执行工程检查",
+            "commands": [
+                {
+                    "id": "TST-001",
+                    "runner": "PYTHON_COMPILE",
+                    "acceptance_criteria_ids": ["AC-001"],
+                    "purpose": "检查 Python 语法",
+                }
+            ],
+        }
+    )
+
+    normalized = RoleAgent._ensure_required_runner(
+        plan,
+        runner=RunnerEnum.ROBOT,
+        acceptance_criteria_ids=["AC-001"],
+        purpose="执行 Robot 验收测试",
+        timeout_seconds=120,
+        limitation="检测到 Robot 测试",
+    )
+
+    assert [command.runner for command in normalized.commands] == [
+        RunnerEnum.PYTHON_COMPILE,
+        RunnerEnum.ROBOT,
+    ]
+    assert normalized.commands[-1].timeout_seconds == 120
+    assert any("Robot" in note for note in normalized.limitations)
+
+
+def test_structured_failure_messages_are_redacted() -> None:
+    summary = StructuredTestSummary(
+        framework="robotframework",
+        total=1,
+        passed=0,
+        failed=1,
+        skipped=0,
+        duration_ms=5,
+        failures=[
+            CaseFailureSchema(
+                name="Login",
+                message="token=super-secret password:also-secret",
+            )
+        ],
+    )
+
+    redacted = RoleAgent._redact_structured_summary(summary)
+
+    assert redacted is not None
+    assert "super-secret" not in redacted.failures[0].message
+    assert "also-secret" not in redacted.failures[0].message
+    assert redacted.failures[0].message == "token=<redacted> password:<redacted>"

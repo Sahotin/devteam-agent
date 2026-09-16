@@ -13,6 +13,7 @@ from backend.app.domain.artifacts import (
     ReviewArtifact,
     TestCommandSpec,
     TestCommandResult,
+    StructuredTestSummary,
     TestPlan,
     TestReportArtifact,
     UIUXArtifact,
@@ -20,6 +21,7 @@ from backend.app.domain.artifacts import (
 from backend.app.domain.enums import CommandStatus, TestRunner, TestVerdict
 from backend.app.domain.memory import MemorySearchResults
 from backend.app.infrastructure.llm.base import StructuredModel
+from backend.app.testing.robot import RobotFrameworkRunner
 from backend.app.tools.base import ToolContext
 from backend.app.tools.registry import ToolRegistry
 from backend.app.tools.terminal import TerminalRunOutput
@@ -96,14 +98,21 @@ class TesterAgent:
                 "runner_policy": {
                     "NODE_CHECK": "原生 JavaScript 项目或没有 package.json 时使用",
                     "STATIC_PAGE_CHECK": "静态网页项目必须使用，用于验证页面可访问且本地资源引用有效",
+                    "PYTHON_COMPILE": "仅检查 Python 源码能否编译，不替代功能测试",
+                    "PYTEST": "Python 项目存在 pytest 测试时使用",
+                    "ROBOT": "项目存在 .robot 验收或回归测试套件时使用",
+                    "UNITTEST": "Python 项目使用标准库 unittest 时使用",
                     "NPM_TEST": "仅当项目包含 package.json 和 test script 时使用",
                     "NPM_BUILD": "TypeScript、React、Vite 等前端工程应使用，用于验证依赖、配置与生产构建",
+                    "MAVEN_TEST": "Maven 项目使用，用于执行 Java 测试",
                 },
             },
             output_schema=TestPlan,
         )
         plan = self._normalize_project_runners(plan, workspace_root)
+        plan = self._deduplicate_commands(plan)
         workspace = Path(workspace_root).resolve()
+        has_robot_suite = RobotFrameworkRunner.discover_target(workspace) is not None
         has_static_page = any(
             candidate.is_file()
             for candidate in (
@@ -111,35 +120,28 @@ class TesterAgent:
                 workspace / "public" / "index.html",
             )
         )
-        if has_static_page and not any(
-            command.runner is TestRunner.STATIC_PAGE_CHECK
-            for command in plan.commands
-        ):
-            next_number = max(
-                (int(command.id.split("-")[1]) for command in plan.commands),
-                default=0,
-            ) + 1
-            plan = plan.model_copy(
-                update={
-                    "commands": [
-                        *plan.commands,
-                        TestCommandSpec(
-                            id=f"TST-{next_number:03d}",
-                            runner=TestRunner.STATIC_PAGE_CHECK,
-                            acceptance_criteria_ids=[
-                                criterion.id for criterion in prd.acceptance_criteria
-                            ],
-                            purpose="验证静态页面能够通过本地服务访问，且本地资源引用完整",
-                            timeout_seconds=30,
-                        ),
-                    ],
-                    "limitations": [
-                        *plan.limitations,
-                        "已执行静态页面可访问性检查；视觉观感仍需要人工或截图评测确认",
-                    ],
-                }
+        if has_robot_suite:
+            plan = self._ensure_required_runner(
+                plan,
+                runner=TestRunner.ROBOT,
+                acceptance_criteria_ids=[
+                    criterion.id for criterion in prd.acceptance_criteria
+                ],
+                purpose="执行仓库已有的 Robot Framework 关键字驱动验收与回归测试",
+                timeout_seconds=120,
+                limitation="检测到 .robot 测试套件，已纳入 Robot Framework 验收检查",
             )
-        plan = self._deduplicate_commands(plan)
+        if has_static_page:
+            plan = self._ensure_required_runner(
+                plan,
+                runner=TestRunner.STATIC_PAGE_CHECK,
+                acceptance_criteria_ids=[
+                    criterion.id for criterion in prd.acceptance_criteria
+                ],
+                purpose="验证静态页面能够通过本地服务访问，且本地资源引用完整",
+                timeout_seconds=30,
+                limitation="已执行静态页面可访问性检查；视觉观感仍需要人工或截图评测确认",
+            )
         plan = self._ensure_acceptance_coverage(plan, prd)
         self._validate_plan(plan, prd)
         results: list[TestCommandResult] = []
@@ -160,6 +162,9 @@ class TesterAgent:
                 context,
             )
             output = TerminalRunOutput.model_validate(invocation.output)
+            structured_summary = self._redact_structured_summary(
+                output.structured_summary
+            )
             results.append(
                 TestCommandResult(
                     command_id=command.id,
@@ -171,6 +176,7 @@ class TesterAgent:
                     stdout_excerpt=self._redact(output.stdout[:4000]),
                     stderr_excerpt=self._redact(output.stderr[:4000]),
                     output_truncated=output.output_truncated,
+                    structured_summary=structured_summary,
                 )
             )
 
@@ -322,6 +328,65 @@ class TesterAgent:
         )
 
     @staticmethod
+    def _ensure_required_runner(
+        plan: TestPlan,
+        *,
+        runner: TestRunner,
+        acceptance_criteria_ids: list[str],
+        purpose: str,
+        timeout_seconds: int,
+        limitation: str,
+    ) -> TestPlan:
+        """把仓库结构能够确定的检查加入计划，同时保持最多五条命令。"""
+        if any(command.runner is runner for command in plan.commands):
+            return plan
+
+        commands = list(plan.commands)
+        notes = list(plan.limitations)
+        if len(commands) >= 5:
+            replaceable = next(
+                (
+                    index
+                    for index, command in enumerate(commands)
+                    if command.runner
+                    in {
+                        TestRunner.NODE_CHECK,
+                        TestRunner.PYTHON_COMPILE,
+                    }
+                ),
+                None,
+            )
+            if replaceable is None:
+                notes.append(
+                    f"检测到 {runner.value} 所需项目结构，但测试计划已达到 5 条上限；"
+                    "本轮未自动追加，需人工调整测试计划"
+                )
+                return plan.model_copy(update={"limitations": notes})
+            removed = commands.pop(replaceable)
+            notes.append(
+                f"测试计划达到 5 条上限，已用 {runner.value} 替换通用检查 "
+                f"{removed.id}/{removed.runner.value}"
+            )
+
+        used_numbers = {int(command.id.split("-")[1]) for command in commands}
+        next_number = next(number for number in range(1, 1000) if number not in used_numbers)
+        commands.append(
+            TestCommandSpec(
+                id=f"TST-{next_number:03d}",
+                runner=runner,
+                acceptance_criteria_ids=acceptance_criteria_ids,
+                purpose=purpose,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+        notes.append(limitation)
+        return TestPlan(
+            summary=plan.summary,
+            commands=commands,
+            limitations=notes,
+        )
+
+    @staticmethod
     def _ensure_acceptance_coverage(
         plan: TestPlan,
         prd: PRDArtifact,
@@ -440,7 +505,42 @@ class TesterAgent:
     @staticmethod
     def _summary(verdict: TestVerdict, results: list[TestCommandResult]) -> str:
         succeeded = sum(result.status is CommandStatus.SUCCEEDED for result in results)
-        return f"测试结论 {verdict.value}：{succeeded}/{len(results)} 个命令执行成功"
+        robot_summary = next(
+            (
+                result.structured_summary
+                for result in results
+                if result.runner is TestRunner.ROBOT
+                and result.structured_summary is not None
+            ),
+            None,
+        )
+        suffix = (
+            f"；Robot Framework {robot_summary.passed}/{robot_summary.total} 条通过"
+            if robot_summary
+            else ""
+        )
+        return (
+            f"测试结论 {verdict.value}：{succeeded}/{len(results)} 个命令执行成功"
+            f"{suffix}"
+        )
+
+    @classmethod
+    def _redact_structured_summary(
+        cls,
+        summary: StructuredTestSummary | None,
+    ) -> StructuredTestSummary | None:
+        if summary is None:
+            return None
+        return summary.model_copy(
+            update={
+                "failures": [
+                    failure.model_copy(
+                        update={"message": cls._redact(failure.message)}
+                    )
+                    for failure in summary.failures
+                ]
+            }
+        )
 
     @staticmethod
     def _redact(content: str) -> str:

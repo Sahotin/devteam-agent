@@ -379,10 +379,41 @@ async def test_docker_executor_builds_restricted_command(tmp_path: Path) -> None
         command.index("--cap-drop") : command.index("--cap-drop") + 2
     ]
     assert command[-5:] == [
-        "devteam-agent/python-runner:0.5.0",
+        "devteam-agent/python-runner:0.6.0",
         "python",
         "-m",
         "pytest",
         "-q",
     ]
     assert command[command.index("--user") + 1] == "10001:10001"
+
+
+@pytest.mark.asyncio
+async def test_docker_robot_executor_uses_fixed_image_and_target(
+    tmp_path: Path,
+) -> None:
+    registry, _repository, task_id, workspace = build_tools(tmp_path)
+    suite_directory = workspace / "tests"
+    suite_directory.mkdir()
+    (suite_directory / "acceptance.robot").write_text(
+        "*** Test Cases ***\nProject Is Ready\n    Should Be Equal    ready    ready\n",
+        encoding="utf-8",
+    )
+    tool = CapturingDockerTool()
+    registry.register(tool)
+
+    await registry.invoke(
+        "terminal.run_test",
+        {"runner": "ROBOT", "timeout_seconds": 10},
+        terminal_context(task_id, workspace),
+    )
+
+    command = tool.command
+    image_index = command.index("devteam-agent/python-runner:0.6.0")
+    assert command[image_index + 1 : image_index + 4] == [
+        "python",
+        "-m",
+        "robot",
+    ]
+    assert command[-1] == "tests"
+    assert ".devteam/test-results/robot" in command

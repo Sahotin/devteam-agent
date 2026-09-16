@@ -1,0 +1,23 @@
+[
+  {
+    "query": "WorkflowService task failure recovery resume checkpoint",
+    "relevant_paths": ["backend/app/orchestrator/service.py"],
+    "relevant_symbols": ["WorkflowService"],
+    "notes": "Manually verified workflow recovery entry point.",
+    "verification": "manually_verified"
+  },
+  {
+    "query": "AgentRunScope ContextBuilder Agent context token budget trimming",
+    "relevant_paths": ["backend/app/agent_runtime/scope.py"],
+    "relevant_symbols": ["AgentRunScope"],
+    "notes": "Manually verified context assembly and token budgeting.",
+    "verification": "manually_verified"
+  },
+  {
+    "query": "ToolRegistry invoke enforce Agent tool permissions",
+    "relevant_paths": ["backend/app/tools/registry.py"],
+    "relevant_symbols": ["ToolRegistry"],
+    "notes": "Manually verified permission enforcement path.",
+    "verification": "manually_verified"
+  }
+]
